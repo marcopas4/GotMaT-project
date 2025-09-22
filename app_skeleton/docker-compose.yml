@@ -1,0 +1,60 @@
+version: '3.8'
+
+services:
+  rag-prefettura:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-prefettura-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # Persisti dati importanti
+      - ./data:/app/data
+      - ./models:/app/models
+      - ./logs:/app/logs
+      # Volume per documenti temporanei (pulizia automatica)
+      - temp_docs:/app/temp
+    environment:
+      - PYTHONPATH=/app
+      - STREAMLIT_SERVER_PORT=8501
+      - STREAMLIT_SERVER_ADDRESS=0.0.0.0
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      - STREAMLIT_SERVER_FILE_WATCHER_TYPE=none
+      # Configurazioni modello (personalizza secondo necessità)
+      - MODEL_PATH=/app/models/fine_tuned_model
+      - VECTOR_DB_PATH=/app/data/faiss_index
+      - KNOWLEDGE_BASE_PATH=/app/data/knowledge_base
+      - MAX_FILE_SIZE_MB=50
+      - CHUNK_SIZE=1000
+      - CHUNK_OVERLAP=200
+    restart: unless-stopped
+    networks:
+      - rag-network
+    # Limitazioni risorse (regola secondo le tue necessità)
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  rag-network:
+    driver: bridge
+
+volumes:
+  temp_docs:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
