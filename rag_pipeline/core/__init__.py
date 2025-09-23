@@ -4,7 +4,7 @@ from .indexing import FAISSIndexManager
 from .document_processor import DocumentProcessor
 from .retrieval import RetrievalManager
 from .cache import QueryCacheManager
-from .query_enhancement import QueryProcessor
+from .query_expansion import QueryProcessor
 
 __all__ = [
     'OptimizedRAGPipeline',

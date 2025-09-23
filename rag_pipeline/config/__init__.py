@@ -1,1 +1,1 @@
-from settings import RAGConfig, IndexType, ResponseMode
+from .settings import RAGConfig, IndexType, ResponseMode
