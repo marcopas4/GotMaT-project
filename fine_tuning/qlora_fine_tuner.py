@@ -17,7 +17,7 @@ from transformers import (
 
 
 # Logging setup
-logger = setup_logger(__name__)
+logger = setup_logger('qloara_fine_tuner')
 
 class QLoRAFineTuner(FineTuner):
     """QLoRA/LoRA Fine-Tuner supporting multiple model types."""
