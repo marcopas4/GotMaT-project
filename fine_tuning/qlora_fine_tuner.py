@@ -3,12 +3,12 @@ import os
 import torch
 from pathlib import Path
 from peft import LoraConfig
-from model.model_loader import ModelLoader
+from fine_tuning.model.model_loader import ModelLoader
 from fine_tuning.fine_tuner import FineTuner
-from utils.logging_utils import setup_logger
-import utils.utils as utils
+from utilities.logging_utils import setup_logger
+import utilities.utils as utils
 from datasets import DatasetDict
-from utils.metrics_utils import HFMetricHelper
+from utilities.metrics_utils import HFMetricHelper
 from data.data_preparation import prepare_dataset_dict
 from transformers import (
     Trainer, Seq2SeqTrainer, TrainingArguments, Seq2SeqTrainingArguments,
@@ -17,7 +17,7 @@ from transformers import (
 
 
 # Logging setup
-logger = setup_logger('qloara_fine_tuner')
+logger = setup_logger('fine_tuning.qlora_fine_tuner')
 
 class QLoRAFineTuner(FineTuner):
     """QLoRA/LoRA Fine-Tuner supporting multiple model types."""

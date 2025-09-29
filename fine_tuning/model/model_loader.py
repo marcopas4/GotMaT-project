@@ -9,10 +9,10 @@ from transformers import (
     BitsAndBytesConfig
 )
 from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training, LoraConfig
-from utils.logging_utils import setup_logger
+from utilities.logging_utils import setup_logger
 from typing import Type
 
-logger = setup_logger('src.core.model_loader')
+logger = setup_logger('fine_tuning.model.model_loader')
 
 class ModelLoader:
     MODEL_TYPE_MAPPING = {

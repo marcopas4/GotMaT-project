@@ -6,9 +6,9 @@ import torch
 from torch.utils.data import Dataset as TorchDataset
 from transformers import PreTrainedTokenizerBase, TensorType
 from datasets import Dataset, DatasetDict, load_dataset
-from utils.logging_utils import setup_logger
+from utilities.logging_utils import setup_logger
 
-logger = setup_logger('src.data.data_preparation')
+logger = setup_logger('fine_tuning.data.data_preparation')
 
 SPLIT_CONFIG = {
     "train_ratio": 0.8,
