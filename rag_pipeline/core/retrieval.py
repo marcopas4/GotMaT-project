@@ -1,6 +1,6 @@
 import logging as logger
 from typing import List
-from rag_pipeline.config.settings import RAGConfig
+from config.settings import RAGConfig
 from llama_index.core import (
     VectorStoreIndex,
     StorageContext

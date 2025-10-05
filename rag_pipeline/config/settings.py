@@ -1,6 +1,12 @@
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List
+import os
+from pathlib import Path
+
+# Ottieni la directory dove si trova questo file config
+_CONFIG_DIR = Path(__file__).parent
+_PROJECT_ROOT = _CONFIG_DIR.parent  # rag_pipeline/
 
 class IndexType(Enum):
     HNSW = "hnsw"
@@ -35,10 +41,10 @@ class RAGConfig:
     
     # FAISS
     index_type: IndexType = IndexType.HNSW
-    faiss_index_path: str = "./faiss_index_optimized"
+    faiss_index_path: str = str(_PROJECT_ROOT / "data" / "indexes")
     
     # Storage
-    storage_path: str = "./storage_optimized"
+    storage_path: str = str(_PROJECT_ROOT / "storage")
     
     # LLM Settings
     ollama_base_url: str = "http://localhost:11434"
@@ -48,6 +54,12 @@ class RAGConfig:
     # Cache
     enable_cache: bool = True
     cache_size: int = 100
+    embeddings_cache_path: str = str(_PROJECT_ROOT / "embeddings_cache")
+    
+    # Data paths
+    data_path: str = str(_PROJECT_ROOT / "data")
+    evaluation_path: str = str(_PROJECT_ROOT / "evaluation")
+    docs_path: str = str(_PROJECT_ROOT / "data" / "documents")
     
     # Performance
     num_threads: int = 8

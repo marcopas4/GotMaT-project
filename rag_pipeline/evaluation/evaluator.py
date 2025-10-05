@@ -2,11 +2,11 @@ import json
 import logging as logger
 from pathlib import Path
 from typing import Dict, Any
-
+from config import RAGConfig
 class EvaluationManager:
     """Gestisce valutazione e logging dei risultati"""
-    
-    def __init__(self, output_dir: str = "./evaluation"):
+
+    def __init__(self, output_dir: str = RAGConfig.evaluation_path):
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(exist_ok=True)
         

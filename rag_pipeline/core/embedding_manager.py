@@ -44,7 +44,7 @@ class EmbeddingManager:
         """Inizializza il modello di embedding"""
         return HuggingFaceEmbedding(
             model_name=self.config.name,
-            cache_folder="./embeddings_cache",
+            cache_folder="./rag_pipeline/embeddings_cache",
             embed_batch_size=self.config.batch_size,
             max_length=self.config.max_length,
             normalize=self.config.normalize,
