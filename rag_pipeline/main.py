@@ -1,10 +1,6 @@
-import sys
 from pathlib import Path
 
-# Aggiungi il path del progetto
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-from config.settings import RAGConfig, IndexType, ResponseMode
+from config import RAGConfig, IndexType, ResponseMode
 from core import OptimizedRAGPipeline
 from evaluation import EvaluationManager
 
@@ -27,7 +23,6 @@ def main():
         enable_cache=True,
         use_reranker=False,
         use_automerging=True,
-        storage_path="./storage",
     )
     
     print("\n📊 Configuration:")
@@ -50,7 +45,7 @@ def main():
         print("📚 Building new index...")
         
         # Crea documenti di esempio se necessario
-        docs_dir = "./data/documents"
+        docs_dir = config.docs_path
         if not Path(docs_dir).exists():
             print(f"❌ Documents directory '{docs_dir}' not found. Please add documents and restart.")
             return
@@ -157,7 +152,7 @@ def main():
                 if 'sources' in result and result['sources']:
                     print(f"\n📚 Sources ({len(result['sources'])} found):")
                     for i, source in enumerate(result['sources'][:3], 1):
-                        print(f"\n  [{i}] Score: {source['score']:.3f} | Level: {source['chunk_level']}")
+                        print(f"\n  [{i}] Score: {source['score']:.3f}")
                         print(f"      {source['text'][:150]}...")
                 
                 # Mostra performance
