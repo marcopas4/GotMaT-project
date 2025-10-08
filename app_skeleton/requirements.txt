@@ -38,3 +38,6 @@ notebook
 
 pytest
 pytest-cov
+
+# Build tools
+pyinstaller
