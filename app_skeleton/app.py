@@ -181,7 +181,7 @@ def handle_file_upload(uploaded_files):
         for doc in failed_uploads:
             st.write(f"• {doc['filename']}: {doc['error']}")
 
-def handle_query(query: str, use_uploaded_docs: bool = False):
+def handle_query(query: str):
     """Gestisce le query dell'utente"""
     if not query.strip():
         return
@@ -195,19 +195,15 @@ def handle_query(query: str, use_uploaded_docs: bool = False):
     
     try:
         with st.spinner("Elaborando la tua domanda..."):
-            # Recupera contesto rilevante
-            if use_uploaded_docs and st.session_state.uploaded_documents:
-                # Cerca nei documenti caricati
-                context = st.session_state.vector_store.search_uploaded_documents(query)
-            else:
-                # Cerca nella knowledge base precaricata
-                context = st.session_state.vector_store.search_knowledge_base(query)
+            # Recupera contesto rilevante dai documenti caricati
+            # La knowledge base è già integrata nel modello fine-tuned
+            context = st.session_state.vector_store.search_uploaded_documents(query)
             
-            # Genera risposta con LLM
+            # Genera risposta con LLM (usa sempre i documenti caricati)
             response = st.session_state.llm_handler.generate_response(
                 query=query,
                 context=context,
-                use_uploaded_docs=use_uploaded_docs
+                use_uploaded_docs=True
             )
             
             # Aggiungi risposta alla cronologia
@@ -282,16 +278,6 @@ def main():
         
         st.divider()
         
-        # Modalità di ricerca
-        st.subheader("🔍 Modalità di Ricerca")
-        search_mode = st.radio(
-            "Dove cercare le informazioni?",
-            ["Knowledge Base Precaricata", "Documenti Caricati", "Entrambi"],
-            help="Scegli se cercare nella base di conoscenza esistente o nei documenti che hai caricato"
-        )
-        
-        st.divider()
-        
         # Statistiche
         st.subheader("📊 Statistiche")
         st.metric("Documenti caricati", len(st.session_state.uploaded_documents))
@@ -326,15 +312,11 @@ def main():
             height=100
         )
         
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            submitted = st.form_submit_button("🚀 Invia Domanda", use_container_width=True)
-        with col2:
-            use_uploaded = st.checkbox("Usa documenti caricati", value=(search_mode != "Knowledge Base Precaricata"))
+        submitted = st.form_submit_button("🚀 Invia Domanda", use_container_width=True)
     
     # Gestisci l'invio della query
     if submitted and user_query:
-        handle_query(user_query, use_uploaded)
+        handle_query(user_query)
         st.rerun()
     
     # Footer con informazioni
@@ -345,8 +327,12 @@ def main():
         
         1. **Carica documenti** (opzionale): Usa la sidebar per caricare PDF, DOCX o immagini
         2. **Fai domande**: Scrivi la tua domanda nell'area di testo in basso
-        3. **Scegli la modalità**: Decidi se cercare nella knowledge base o nei tuoi documenti
-        4. **Ricevi risposte**: L'AI analizzerà i documenti e fornirà risposte pertinenti
+        3. **Ricevi risposte**: L'AI analizzerà i documenti caricati e fornirà risposte pertinenti basate sul modello fine-tuned
+        
+        **Caratteristiche:**
+        - Il modello è stato fine-tuned sulla knowledge base degli illeciti amministrativi
+        - I documenti caricati vengono sempre utilizzati per fornire risposte contestuali
+        - Il sistema integra automaticamente le conoscenze del modello con i tuoi documenti
         
         **Tipi di domande che puoi fare:**
         - Domande generali sugli illeciti amministrativi
