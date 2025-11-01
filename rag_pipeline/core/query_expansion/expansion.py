@@ -41,13 +41,9 @@ class QueryExpansionModule:
         self.variant_generator = SemanticVariantGenerator(llm)
         self.term_expander = TermExpander(index, embed_model)
         
-        # Cache
-        self.expansion_cache = {}
-        
         # Stats
         self.stats = {
-            "total_expansions": 0,
-            "cache_hits": 0
+            "total_expansions": 0
         }
         
         logger.info("QueryExpansionModule initialized")
@@ -62,12 +58,6 @@ class QueryExpansionModule:
         Returns:
             QueryExpansion con tutti i tipi di espansione
         """
-        # Check cache
-        if query in self.expansion_cache:
-            self.stats["cache_hits"] += 1
-            logger.debug(f"Cache hit for expansion: {query[:50]}...")
-            return self.expansion_cache[query]
-        
         self.stats["total_expansions"] += 1
         
         # Crea oggetto espansione
@@ -103,19 +93,12 @@ class QueryExpansionModule:
         # 6. Rileva lingua
         expansion.language = self._detect_language(query)
         
-        # Cache risultato
-        self.expansion_cache[query] = expansion
-        
         return expansion
     
     def _is_complex_query(self, query: str) -> bool:
-        """
-        Determina se una query è complessa e necessita decomposizione
-        """
-        # Indicatori di complessità
+        """Determina se una query è complessa e necessita decomposizione"""
         conjunctions = ['e', 'o', 'ma', 'inoltre', 'oppure', 'and', 'or', 'but', 'also']
         
-        # Check multipli criteri
         has_conjunctions = any(f" {conj} " in query.lower() for conj in conjunctions)
         is_long = len(query.split()) > 12
         has_multiple_questions = query.count('?') > 1
@@ -124,9 +107,7 @@ class QueryExpansionModule:
         return has_conjunctions or is_long or has_multiple_questions or has_multiple_clauses
     
     def _decompose_query(self, query: str) -> List[str]:
-        """
-        Decompone query complesse in sub-queries
-        """
+        """Decompone query complesse in sub-queries"""
         import re
         
         sub_queries = []
@@ -135,18 +116,15 @@ class QueryExpansionModule:
         conjunction_pattern = r'\s+(?:e|o|ma|inoltre|oppure|and|or|but|also)\s+'
         parts = re.split(conjunction_pattern, query, flags=re.IGNORECASE)
         
-        # Filtra e valida parti
         for part in parts:
             part = part.strip()
             
-            # Validazioni
-            if len(part) < 10:  # Troppo corta
+            if len(part) < 10:
                 continue
             
-            if part.lower() in ['e', 'o', 'ma', 'inoltre']:  # Solo congiunzione
+            if part.lower() in ['e', 'o', 'ma', 'inoltre']:
                 continue
             
-            # Aggiungi ? se è una domanda senza ?
             if self._is_question(part) and '?' not in part:
                 part += '?'
             
@@ -160,7 +138,7 @@ class QueryExpansionModule:
                 if len(q) > 5 and q not in sub_queries:
                     sub_queries.append(q + '?')
         
-        # Deduplica mantenendo ordine
+        # Deduplica
         seen = set()
         unique_subs = []
         for sub in sub_queries:
@@ -169,12 +147,10 @@ class QueryExpansionModule:
                 unique_subs.append(sub)
                 seen.add(sub_lower)
         
-        return unique_subs[:3]  # Max 3 sub-queries
+        return unique_subs[:3]
     
     def _is_question(self, text: str) -> bool:
-        """
-        Determina se un testo è una domanda
-        """
+        """Determina se un testo è una domanda"""
         question_words = [
             'cosa', 'come', 'quando', 'dove', 'chi', 'quale', 'quanto',
             'perché', 'what', 'how', 'when', 'where', 'who', 'which',
@@ -185,9 +161,7 @@ class QueryExpansionModule:
         return any(text_lower.startswith(qw) for qw in question_words)
     
     def _detect_language(self, query: str) -> str:
-        """
-        Rileva la lingua della query (euristica semplice)
-        """
+        """Rileva la lingua della query"""
         italian_indicators = [
             'cosa', 'come', 'quando', 'dove', 'chi', 'quale',
             'è', 'sono', 'questo', 'quello', 'il', 'la', 'i', 'le',
@@ -199,20 +173,14 @@ class QueryExpansionModule:
         
         return "it" if italian_score >= 2 else "en"
     
-    def clear_cache(self):
-        """Pulisce la cache delle espansioni"""
-        self.expansion_cache.clear()
-        self.variant_generator.clear_cache()
-        self.term_expander.clear_cache()
-        logger.info("Expansion caches cleared")
-    
     def get_stats(self) -> Dict[str, Any]:
         """Ritorna statistiche del modulo"""
         return {
             "total_expansions": self.stats["total_expansions"],
-            "cache_hits": self.stats["cache_hits"],
-            "cache_size": len(self.expansion_cache),
-            "hit_rate": (
-                f"{(self.stats['cache_hits'] / max(1, self.stats['total_expansions'])) * 100:.1f}%"
-            )
+            "components": {
+                "keyword_extractor": "active",
+                "intent_classifier": "active",
+                "variant_generator": "active" if self.variant_generator.llm else "pattern-based",
+                "term_expander": "active"
+            }
         }

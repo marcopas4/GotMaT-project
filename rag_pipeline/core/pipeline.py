@@ -1,9 +1,9 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Set
 from pathlib import Path
 import time
 import json
 import numpy as np
-import logging as logger
+import logging
 from llama_index.core import (
     VectorStoreIndex,
     StorageContext,
@@ -12,17 +12,19 @@ from llama_index.core import (
     Settings
 )
 from llama_index.core.storage.docstore import SimpleDocumentStore
-from config.settings import RAGConfig, IndexType, ResponseMode
+from config.settings import RAGConfig, ResponseMode
 from core.embedding_manager import EmbeddingManager
 from core.indexing import FAISSIndexManager
 from core.document_processor import DocumentProcessor
 from core.retrieval import RetrievalManager
-from core.cache import QueryCacheManager
 from llama_index.llms.ollama import Ollama
 from llama_index.vector_stores.faiss import FaissVectorStore
 from llama_index.core.query_engine import RetrieverQueryEngine
-from core.query_expansion import QueryProcessor, QueryConfig, FusionMethod
+from core.query_expansion import QueryProcessor, QueryConfig
 from llama_index.core.schema import QueryBundle
+
+logger = logging.getLogger(__name__)
+
 
 class OptimizedRAGPipeline:
     """Pipeline RAG principale che coordina tutti i componenti"""
@@ -36,21 +38,20 @@ class OptimizedRAGPipeline:
         """
         self.config = config or RAGConfig()
         
-        # Inizializza componenti
+        # Inizializza componenti core
         self.embedding_manager = EmbeddingManager(self.config.embedding_model)
+        
+        # FLAT index - sempre deterministico
         self.faiss_manager = FAISSIndexManager(
-            self.embedding_manager.config.dimension,
-            self.config.index_type
+            dimension=self.embedding_manager.config.dimension,
+            index_type="Flat"  # Hardcoded per FLAT
         )
+        
         self.document_processor = DocumentProcessor(
             self.config.chunk_sizes,
             self.config.chunk_overlap
         )
         self.retrieval_manager = RetrievalManager(self.config)
-        self.cache_manager = QueryCacheManager(
-            self.config.enable_cache,
-            self.config.cache_size
-        )
         
         # Query processor per enhancement
         self.query_processor = None
@@ -70,13 +71,19 @@ class OptimizedRAGPipeline:
         self.stats = {
             "total_queries": 0,
             "avg_retrieval_time": 0,
-            "index_built": False
+            "index_built": False,
+            "reranking_enabled": self.config.use_reranker,
+            "total_nodes_retrieved": 0,
+            "total_nodes_after_dedup": 0,
+            "total_nodes_after_rerank": 0
         }
         
         # Crea directory necessarie
         self._create_directories()
         
-        logger.info("RAG Pipeline initialized successfully")
+        logger.info("RAG Pipeline initialized with FLAT index (deterministic)")
+        if self.config.use_reranker:
+            logger.info("Jina reranker enabled")
     
     def _setup_llm(self):
         """Configura LLM Ollama"""
@@ -116,7 +123,7 @@ class OptimizedRAGPipeline:
         documents: List[Document] = None
     ) -> VectorStoreIndex:
         """
-        Costruisce indice dai documenti
+        Costruisce indice FLAT deterministico dai documenti
         
         Args:
             file_paths: Lista di file da indicizzare
@@ -126,7 +133,7 @@ class OptimizedRAGPipeline:
         Returns:
             VectorStoreIndex costruito
         """
-        logger.info("Building optimized index...")
+        logger.info("Building FLAT index (deterministic)...")
         
         # Carica documenti se non forniti
         if documents is None:
@@ -141,7 +148,7 @@ class OptimizedRAGPipeline:
         # Crea nodi gerarchici
         leaf_nodes, all_nodes = self.document_processor.create_hierarchical_nodes(documents)
         
-        # Setup FAISS index
+        # Setup FAISS FLAT index
         faiss_index = self.faiss_manager.create_index()
         vector_store = FaissVectorStore(faiss_index=faiss_index)
         
@@ -163,53 +170,25 @@ class OptimizedRAGPipeline:
             use_async=self.config.async_processing
         )
         
-        # Training per IVF se necessario
-        if self.config.index_type == IndexType.IVF:
-            self._train_ivf_index(leaf_nodes)
-        
         # Setup retriever
         self.retrieval_manager.create_retriever(self.index, self.storage_context)
         
-        # Inizializza query processor con accesso al vector store
+        # Inizializza query processor
         config = QueryConfig(
             llm=self.llm,
             embed_model=self.embedding_manager.model,
-            fusion_method=FusionMethod.RECIPROCAL_RANK.value,
-            cache_enabled=True,
             use_llm_variants=True
         )
         
         self.query_processor = QueryProcessor(
-            config=config,
+            index=self.index,
+            config=config
         )
-        # Passa l'index al query processor
-        self.query_processor.index = self.index
-        
-        # Salva indice
-        self.save_index()
         
         self.stats["index_built"] = True
-        logger.info("Index built successfully!")
+        logger.info(f"FLAT index built successfully with {len(leaf_nodes)} nodes")
         
         return self.index
-    
-    def _train_ivf_index(self, nodes: List, max_training: int = 1000):
-        """Addestra IVF index con subset di nodi"""
-        logger.info("Training IVF index...")
-        
-        training_nodes = nodes[:min(max_training, len(nodes))]
-        training_vectors = []
-        
-        for node in training_nodes:
-            embedding = self.embedding_manager.get_embedding(node.text)
-            training_vectors.append(embedding)
-        
-        if training_vectors:
-            training_array = np.vstack(training_vectors).astype('float32')
-            self.faiss_manager.train_index(
-                self.storage_context.vector_store._faiss_index,
-                training_array
-            )
     
     def setup_query_engine(self, response_mode: ResponseMode = ResponseMode.TREE_SUMMARIZE):
         """Configura query engine"""
@@ -233,9 +212,93 @@ class OptimizedRAGPipeline:
         
         logger.info(f"Query engine configured with mode: {response_mode.value}")
     
+    def _jaccard_similarity(self, text1: str, text2: str) -> float:
+        """
+        Calcola Jaccard similarity tra due testi
+        
+        Args:
+            text1: Primo testo
+            text2: Secondo testo
+            
+        Returns:
+            Jaccard similarity score [0, 1]
+        """
+        # Tokenizza e converti in set
+        tokens1 = set(text1.lower().split())
+        tokens2 = set(text2.lower().split())
+        
+        # Calcola intersezione e unione
+        intersection = tokens1.intersection(tokens2)
+        union = tokens1.union(tokens2)
+        
+        # Evita divisione per zero
+        if len(union) == 0:
+            return 0.0
+        
+        return len(intersection) / len(union)
+    
+    def _deduplicate_nodes(
+        self,
+        nodes: List,
+        similarity_threshold: float = 0.85
+    ) -> List:
+        """
+        Rimuove nodi duplicati usando Jaccard similarity
+        
+        Args:
+            nodes: Lista di nodi da dedupplicare
+            similarity_threshold: Soglia di similarità per considerare duplicati
+            
+        Returns:
+            Lista di nodi dedupplicati
+        """
+        if not nodes:
+            return []
+        
+        dedup_start = time.time()
+        unique_nodes = []
+        seen_texts = []
+        duplicates_removed = 0
+        
+        for node in nodes:
+            node_text = node.text
+            is_duplicate = False
+            
+            # Confronta con tutti i nodi già visti
+            for seen_text in seen_texts:
+                similarity = self._jaccard_similarity(node_text, seen_text)
+                
+                if similarity >= similarity_threshold:
+                    is_duplicate = True
+                    duplicates_removed += 1
+                    break
+            
+            # Aggiungi solo se non è duplicato
+            if not is_duplicate:
+                unique_nodes.append(node)
+                seen_texts.append(node_text)
+        
+        dedup_time = time.time() - dedup_start
+        
+        logger.info(
+            f"Deduplication: {len(nodes)} → {len(unique_nodes)} nodes "
+            f"({duplicates_removed} duplicates removed, "
+            f"threshold={similarity_threshold}, "
+            f"time={dedup_time:.3f}s)"
+        )
+        
+        return unique_nodes
+    
     def query(self, question: str, enhance_query: bool = True) -> Dict[str, Any]:
         """
-        Esegue query con enhancement avanzato
+        Esegue query con enhancement, deduplication e reranking
+        
+        Flusso:
+        1. Espandi query in multiple varianti
+        2. Retrieval per ogni query
+        3. Deduplicazione con Jaccard similarity
+        4. Reranking con Jina
+        5. Synthesis della risposta
         
         Args:
             question: Domanda da porre
@@ -244,62 +307,159 @@ class OptimizedRAGPipeline:
         Returns:
             Risultato con risposta e metadata
         """
+        # Validazione input
+        if not question or not question.strip():
+            raise ValueError("Question cannot be empty")
+        
         start_time = time.time()
         
         # Setup query engine se necessario
         if not self.query_engine:
             self.setup_query_engine()
         
-        # Check cache
-        query_hash = self.cache_manager.compute_hash(question)
-        cached_result = self.cache_manager.get(query_hash)
+        # Metadata tracking
+        query_metadata = {
+            "original_query": question,
+            "enhanced": enhance_query
+        }
+        reranking_applied = False
+        all_nodes = []
         
-        if cached_result:
-            cached_result["from_cache"] = True
-            return cached_result
-        
-        # Query enhancement avanzato
-        enhanced_results = None
-        query_metadata = {}
-        
+        # STEP 1: Query Enhancement
         if enhance_query and self.query_processor:
             try:
-                # Usa il nuovo enhanced_retrieval invece del process_query
-                enhanced_results = self.query_processor.retrieve(
+                expansion_start = time.time()
+                
+                # Genera query espanse
+                expansion_result = self.query_processor.expand(
                     query=question,
-                    top_k=self.config.similarity_top_k,
-                    max_queries=getattr(self.config, "max_queries", 10),
-                    fusion_method=FusionMethod.RECIPROCAL_RANK.value
+                    max_queries=getattr(self.config, "max_queries", 10)
                 )
                 
-                qi = enhanced_results.get("query_info", {})
-                query_metadata = {
-                    "original_query": question,
-                    "method": qi.get("fusion_method") or enhanced_results.get("method"),
-                    "fusion_method": qi.get("fusion_method"),
-                    "num_queries": qi.get("num_queries_executed", len(qi.get("queries", []))),
-                    "queries_executed": qi.get("queries", [])
+                queries = expansion_result["queries"]
+                expansions = expansion_result["expansions"]
+                
+                expansion_time = time.time() - expansion_start
+                
+                query_metadata.update({
+                    "num_queries_generated": len(queries),
+                    "queries": queries,
+                    "expansions": {
+                        "keywords": expansions.get("keywords", []),
+                        "intent": expansions.get("intent", "general"),
+                        "semantic_variants": expansions.get("semantic_variants", []),
+                        "sub_queries": expansions.get("sub_queries", [])
+                    },
+                    "expansion_time": f"{expansion_time:.3f}s"
+                })
+                
+                logger.info(f"Query expansion: {len(queries)} queries generated in {expansion_time:.3f}s")
+                
+                # STEP 2: Multi-Query Retrieval
+                retrieval_start = time.time()
+                
+                for i, q in enumerate(queries):
+                    try:
+                        retriever = self.index.as_retriever(
+                            similarity_top_k=self.config.similarity_top_k
+                        )
+                        nodes = retriever.retrieve(q)
+                        all_nodes.extend(nodes)
+                        
+                        logger.debug(f"Query {i+1}/{len(queries)}: '{q[:50]}...' → {len(nodes)} nodes")
+                        
+                    except Exception as e:
+                        logger.warning(f"Retrieval failed for query '{q[:50]}...': {e}")
+                        continue
+                
+                retrieval_time = time.time() - retrieval_start
+                
+                query_metadata["retrieval"] = {
+                    "total_nodes_retrieved": len(all_nodes),
+                    "retrieval_time": f"{retrieval_time:.3f}s",
+                    "avg_nodes_per_query": len(all_nodes) / len(queries) if queries else 0
                 }
-
-                logger.info(f"Enhanced retrieval completed with {query_metadata['num_queries']} queries")
+                
+                self.stats["total_nodes_retrieved"] += len(all_nodes)
+                
+                logger.info(f"Multi-retrieval: {len(all_nodes)} total nodes from {len(queries)} queries in {retrieval_time:.3f}s")
+                
+                # STEP 3: Deduplication con Jaccard Similarity
+                if all_nodes:
+                    dedup_threshold = getattr(self.config, "dedup_threshold", 0.85)
+                    unique_nodes = self._deduplicate_nodes(all_nodes, dedup_threshold)
+                    
+                    query_metadata["deduplication"] = {
+                        "nodes_before": len(all_nodes),
+                        "nodes_after": len(unique_nodes),
+                        "duplicates_removed": len(all_nodes) - len(unique_nodes),
+                        "threshold": dedup_threshold
+                    }
+                    
+                    self.stats["total_nodes_after_dedup"] += len(unique_nodes)
+                    
+                    all_nodes = unique_nodes
+                
+                # STEP 4: Reranking con Jina
+                if self.config.use_reranker and all_nodes:
+                    try:
+                        rerank_start = time.time()
+                        original_count = len(all_nodes)
+                        
+                        # Rerank dei nodi dedupplicati
+                        reranked_nodes = self.retrieval_manager.rerank_nodes(
+                            query=question,
+                            nodes=all_nodes,
+                            top_n=min(self.config.similarity_top_k, len(all_nodes))
+                        )
+                        
+                        rerank_time = time.time() - rerank_start
+                        reranking_applied = True
+                        
+                        query_metadata["reranking"] = {
+                            "applied": True,
+                            "nodes_before": original_count,
+                            "nodes_after": len(reranked_nodes),
+                            "rerank_time": f"{rerank_time:.3f}s"
+                        }
+                        
+                        self.stats["total_nodes_after_rerank"] += len(reranked_nodes)
+                        
+                        all_nodes = reranked_nodes
+                        
+                        logger.info(f"Reranking: {original_count} → {len(reranked_nodes)} nodes in {rerank_time:.3f}s")
+                        
+                    except Exception as e:
+                        logger.warning(f"Reranking failed: {e}, continuing without reranking")
+                        query_metadata["reranking"] = {
+                            "applied": False,
+                            "error": str(e)
+                        }
                 
             except Exception as e:
-                logger.warning(f"Query enhancement failed: {e}")
-                enhanced_results = None
-    
-        # Esegui query
+                logger.warning(f"Query enhancement pipeline failed: {e}, falling back to standard retrieval")
+                all_nodes = []
+                query_metadata["enhancement_error"] = str(e)
+        
+        # STEP 5: Synthesis
         try:
-            # Se abbiamo risultati enhanced, usiamo quelli
-            if enhanced_results and enhanced_results.get("nodes"):
+            synthesis_start = time.time()
+            
+            # Se abbiamo nodi enhanced, usiamo quelli
+            if all_nodes:
                 qb = QueryBundle(query_str=question)
                 response = self.query_engine.synthesize(
                     query_bundle=qb,
-                    nodes=enhanced_results["nodes"]
+                    nodes=all_nodes
                 )
             else:
                 # Fallback alla query normale
+                logger.info("Falling back to standard query (no enhanced nodes)")
                 response = self.query_engine.query(question)
-        
+            
+            synthesis_time = time.time() - synthesis_start
+            query_metadata["synthesis_time"] = f"{synthesis_time:.3f}s"
+            
             # Prepara risultato
             result = {
                 "question": question,
@@ -307,43 +467,48 @@ class OptimizedRAGPipeline:
                 "response_time": time.time() - start_time,
                 "model": self.config.llm_model,
                 "embedding_model": self.config.embedding_model,
-                "from_cache": False,
+                "index_type": "FLAT (deterministic)",
+                "reranking_applied": reranking_applied,
                 "query_metadata": query_metadata
             }
             
-            # Aggiungi sources e metadata dal retrieval avanzato
-            if enhanced_results and enhanced_results.get("nodes"):
+            # Aggiungi sources
+            if all_nodes:
                 sources = []
-                for i, node in enumerate(enhanced_results["nodes"][:5]):
+                for i, node in enumerate(all_nodes[:5]):
                     source = {
                         "text": node.text[:300] + "..." if len(node.text) > 300 else node.text,
-                        "score": float(enhanced_results["scores"][i]) if enhanced_results.get("scores") else 0.0,
+                        "score": float(node.score) if hasattr(node, 'score') and node.score else 0.0,
                         "metadata": node.metadata,
-                        "fusion_metadata": enhanced_results.get("metadata", [])[i] if enhanced_results.get("metadata") else {}
+                        "reranked": reranking_applied
                     }
                     sources.append(source)
                 
                 result["sources"] = sources
                 result["num_sources"] = len(sources)
-                result["fusion_details"] = enhanced_results.get("fusion_details", {})
-        
-            # Cache risultato
-            self.cache_manager.set(query_hash, result)
             
             # Aggiorna statistiche
             self._update_stats(result["response_time"])
             
-            logger.info(f"Query completed in {result['response_time']:.2f}s")
+            logger.info(
+                f"Query completed in {result['response_time']:.2f}s "
+                f"(enhanced: {enhance_query}, reranked: {reranking_applied})"
+            )
+            
             return result
             
         except Exception as e:
             logger.error(f"Query failed: {e}")
+            import traceback
+            traceback.print_exc()
+            
             return {
                 "question": question,
                 "answer": f"Error: {str(e)}",
                 "error": str(e),
                 "response_time": time.time() - start_time,
-                "from_cache": False
+                "reranking_applied": False,
+                "query_metadata": query_metadata
             }
     
     def _update_stats(self, response_time: float):
@@ -355,147 +520,6 @@ class OptimizedRAGPipeline:
         n = self.stats["total_queries"]
         self.stats["avg_retrieval_time"] = (prev_avg * (n - 1) + response_time) / n
     
-    def save_index(self):
-        """Salva indice e metadata su disco"""
-        if not self.index or not self.storage_context:
-            logger.warning("No index to save")
-            return
-        
-        # Salva storage context
-        self.storage_context.persist(persist_dir=self.config.storage_path)
-        
-        # Salva FAISS index
-        faiss_index = self.storage_context.vector_store._faiss_index
-        index_path = f"{self.config.faiss_index_path}/index.faiss"
-        self.faiss_manager.save_index(faiss_index, index_path)
-        
-        # Salva metadata
-        metadata = {
-            "config": {
-                "llm_model": self.config.llm_model,
-                "embedding_model": self.config.embedding_model,
-                "chunk_sizes": self.config.chunk_sizes,
-                "index_type": self.config.index_type.value
-            },
-            "stats": {
-                **self.stats,
-                **self.document_processor.stats,
-                "cache": self.cache_manager.get_stats()
-            },
-            "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
-        }
-        
-        metadata_path = f"{self.config.faiss_index_path}/metadata.json"
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-        
-        logger.info(f"Index saved to {self.config.storage_path}")
-    
-    def load_index(self) -> bool:
-        """
-        Carica indice esistente da disco
-        
-        Returns:
-            True se caricato con successo, False altrimenti
-        """
-        try:
-            # Check esistenza
-            if not Path(self.config.storage_path).exists():
-                logger.info("No existing index found")
-                return False
-            
-            # Carica metadata
-            metadata_path = f"{self.config.faiss_index_path}/metadata.json"
-            if Path(metadata_path).exists():
-                with open(metadata_path, "r") as f:
-                    metadata = json.load(f)
-                    self.stats.update(metadata.get("stats", {}))
-                    logger.info(f"Metadata loaded - Created: {metadata.get('created_at', 'N/A')}")
-            
-            # Carica FAISS index
-            index_path = f"{self.config.faiss_index_path}/index.faiss"
-            if Path(index_path).exists():
-                faiss_index = self.faiss_manager.load_index(index_path)
-                vector_store = FaissVectorStore(faiss_index=faiss_index)
-            else:
-                faiss_index = self.faiss_manager.create_index()
-                vector_store = FaissVectorStore(faiss_index=faiss_index)
-            
-            # Ricostruisci storage context
-            self.storage_context = StorageContext.from_defaults(
-                vector_store=vector_store,
-                persist_dir=self.config.storage_path
-            )
-            
-            # Carica indice
-            self.index = load_index_from_storage(
-                self.storage_context,
-                embed_model=self.embedding_manager.model
-            )
-            
-            # Setup retriever
-            self.retrieval_manager.create_retriever(self.index, self.storage_context)
-            config = QueryConfig(
-                llm=self.llm,
-                embed_model=self.embedding_manager.model,
-                fusion_method=FusionMethod.RECIPROCAL_RANK.value,
-                cache_enabled=True,
-                use_llm_variants=True
-            )
-            # Inizializza query processor
-            self.query_processor = QueryProcessor(
-                config=config,
-                index =self.index,
-            )
-            
-            self.stats["index_built"] = True
-            logger.info("Index loaded successfully")
-            return True
-            
-        except Exception as e:
-            logger.error(f"Failed to load index: {e}")
-            return False
-    
-    def update_index(self, file_paths: List[str] = None, directories: List[str] = None):
-        """
-        Aggiorna indice con nuovi documenti
-        
-        Args:
-            file_paths: Nuovi file da aggiungere
-            directories: Nuove directory da aggiungere
-        """
-        if not self.index:
-            raise ValueError("Index not initialized")
-        
-        # Carica nuovi documenti
-        new_documents = self.document_processor.load_documents(
-            file_paths=file_paths,
-            directories=directories
-        )
-        
-        if not new_documents:
-            logger.warning("No new documents to add")
-            return
-        
-        # Crea nodi
-        leaf_nodes, all_nodes = self.document_processor.create_hierarchical_nodes(new_documents)
-        
-        # Inserisci nell'indice
-        self.index.insert_nodes(leaf_nodes)
-        
-        # Aggiorna docstore
-        if self.storage_context.docstore:
-            self.storage_context.docstore.add_documents(all_nodes)
-        
-        # Salva indice aggiornato
-        self.save_index()
-        
-        logger.info(f"Index updated with {len(new_documents)} new documents")
-    
-    def clear_cache(self):
-        """Pulisce cache delle query"""
-        self.cache_manager.clear()
-    
     def get_statistics(self) -> Dict[str, Any]:
         """
         Ottieni statistiche complete della pipeline
@@ -503,15 +527,17 @@ class OptimizedRAGPipeline:
         Returns:
             Dizionario con tutte le statistiche
         """
-        return {
+        stats = {
             "configuration": {
                 "llm_model": self.config.llm_model,
                 "embedding_model": self.config.embedding_model,
                 "embedding_dim": self.embedding_manager.config.dimension,
-                "index_type": self.config.index_type.value,
+                "index_type": "FLAT (deterministic)",
                 "chunk_sizes": self.config.chunk_sizes,
                 "context_window": self.config.context_window,
-                "temperature": self.config.temperature
+                "temperature": self.config.temperature,
+                "reranker_enabled": self.config.use_reranker,
+                "dedup_threshold": getattr(self.config, "dedup_threshold", 0.85)
             },
             "data": self.document_processor.stats,
             "performance": {
@@ -519,5 +545,25 @@ class OptimizedRAGPipeline:
                 "avg_response_time": f"{self.stats['avg_retrieval_time']:.3f}s",
                 "index_built": self.stats["index_built"]
             },
-            "cache": self.cache_manager.get_stats()
+            "retrieval_stats": {
+                "total_nodes_retrieved": self.stats["total_nodes_retrieved"],
+                "total_nodes_after_dedup": self.stats["total_nodes_after_dedup"],
+                "total_nodes_after_rerank": self.stats["total_nodes_after_rerank"],
+                "avg_nodes_retrieved": (
+                    self.stats["total_nodes_retrieved"] / self.stats["total_queries"]
+                    if self.stats["total_queries"] > 0 else 0
+                ),
+                "avg_dedup_reduction": (
+                    1 - (self.stats["total_nodes_after_dedup"] / self.stats["total_nodes_retrieved"])
+                    if self.stats["total_nodes_retrieved"] > 0 else 0
+                )
+            }
         }
+        
+        # Aggiungi metriche del reranker se disponibili
+        if self.config.use_reranker:
+            reranker_metrics = self.retrieval_manager.get_reranker_metrics()
+            if reranker_metrics:
+                stats["reranker"] = reranker_metrics
+        
+        return stats

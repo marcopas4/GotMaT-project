@@ -8,10 +8,7 @@ from pathlib import Path
 _CONFIG_DIR = Path(__file__).parent
 _PROJECT_ROOT = _CONFIG_DIR.parent  # rag_pipeline/
 
-class IndexType(Enum):
-    HNSW = "hnsw"
-    IVF = "ivf"
-    FLAT = "flat"
+
 
 class ResponseMode(Enum):
     TREE_SUMMARIZE = "tree_summarize"
@@ -40,7 +37,7 @@ class RAGConfig:
     chunk_overlap: int = 50
     
     # FAISS
-    index_type: IndexType = IndexType.HNSW
+    index_type: str = "Flat"  
     faiss_index_path: str = str(_PROJECT_ROOT / "data" / "indexes")
     
     # Storage
@@ -51,10 +48,6 @@ class RAGConfig:
     temperature: float = 0.3
     context_window: int = 4096
     
-    # Cache
-    enable_cache: bool = True
-    cache_size: int = 100
-    embeddings_cache_path: str = str(_PROJECT_ROOT / "embeddings_cache")
     
     # Data paths
     data_path: str = str(_PROJECT_ROOT / "data")

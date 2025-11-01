@@ -7,36 +7,16 @@ import logging as logger
 class EmbeddingManager:
     """Gestisce modelli di embedding e configurazioni"""
     
-    # Configurazioni predefinite per diversi modelli
-    CONFIGS = {
-        "nomic-ai/nomic-embed-text-v1.5": EmbeddingConfig(
-            name="nomic-ai/nomic-embed-text-v1.5",
-            dimension=768,
-            max_length=8192,
-            description="Ottimizzato per ARM, lungo contesto"
-        ),
-        "intfloat/e5-small-v2": EmbeddingConfig(
-            name="intfloat/e5-small-v2",
-            dimension=384,
-            max_length=512,
-            description="Veloce, accurato, leggero"
-        ),
-        "BAAI/bge-small-en-v1.5": EmbeddingConfig(
-            name="BAAI/bge-small-en-v1.5",
-            dimension=384,
-            max_length=512,
-            description="Buon compromesso velocità/qualità"
-        ),
-        "sentence-transformers/all-MiniLM-L6-v2": EmbeddingConfig(
-            name="sentence-transformers/all-MiniLM-L6-v2",
-            dimension=384,
-            max_length=256,
-            description="Ultra veloce, buono per prototipazione"
-        )
-    }
+    # Configurazione predefinita per Nomic
+    CONFIG = EmbeddingConfig(
+        name="nomic-ai/nomic-embed-text-v1.5",
+        dimension=768,
+        max_length=8192,
+        description="Ottimizzato per ARM, lungo contesto"
+    )
     
     def __init__(self, model_name: str = "nomic-ai/nomic-embed-text-v1.5"):
-        self.config = self.CONFIGS.get(model_name, self.CONFIGS["BAAI/bge-small-en-v1.5"])
+        self.config = self.CONFIG
         self.model = self._initialize_model()
         logger.info(f"Embedding model initialized: {self.config.name} (dim={self.config.dimension})")
     

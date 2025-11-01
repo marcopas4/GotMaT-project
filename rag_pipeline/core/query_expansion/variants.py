@@ -6,7 +6,7 @@ Genera varianti semantiche delle query usando LLM o pattern
 
 import logging
 import re
-from typing import List, Dict, Optional, Any
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,6 @@ class SemanticVariantGenerator:
         """
         self.llm = llm
         self.use_llm = llm is not None
-        self.variants_cache = {}
         
         logger.info(f"SemanticVariantGenerator initialized (LLM: {self.use_llm})")
     
@@ -44,12 +43,6 @@ class SemanticVariantGenerator:
         Returns:
             Lista di varianti semantiche
         """
-        # Check cache
-        cache_key = f"{query}_{intent}"
-        if cache_key in self.variants_cache:
-            logger.debug(f"Using cached variants for: {query[:30]}...")
-            return self.variants_cache[cache_key][:max_variants]
-        
         variants = []
         
         # Usa LLM se disponibile
@@ -62,10 +55,6 @@ class SemanticVariantGenerator:
                 variants = self._generate_with_patterns(query, intent, max_variants)
         else:
             variants = self._generate_with_patterns(query, intent, max_variants)
-        
-        # Cache risultato
-        if variants:
-            self.variants_cache[cache_key] = variants
         
         return variants[:max_variants]
     

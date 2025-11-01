@@ -3,7 +3,6 @@ from .embedding_manager import EmbeddingManager
 from .indexing import FAISSIndexManager
 from .document_processor import DocumentProcessor
 from .retrieval import RetrievalManager
-from .cache import QueryCacheManager
 from .query_expansion import QueryProcessor
 
 __all__ = [
@@ -12,6 +11,5 @@ __all__ = [
     'FAISSIndexManager',
     'DocumentProcessor',
     'RetrievalManager',
-    'QueryCacheManager',
     'QueryProcessor'
 ]

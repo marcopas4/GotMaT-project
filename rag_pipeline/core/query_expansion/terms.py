@@ -26,7 +26,6 @@ class TermExpander:
         """
         self.index = index
         self.embed_model = embed_model
-        self.expansion_cache = {}
         
         # Dizionario fallback per domini comuni
         self.domain_expansions = self._load_domain_expansions()
@@ -50,19 +49,13 @@ class TermExpander:
         """
         expanded_terms = set()
         
-        # Se non abbiamo index, usa solo fallback
         if not self.index:
             logger.warning("No index available, using fallback expansion")
             return self._expand_fallback(keywords, max_terms)
         
         # Espandi ogni keyword
-        for keyword in keywords[:5]:  # Limita per performance
+        for keyword in keywords[:5]:
             if len(keyword) < 3:
-                continue
-            
-            # Check cache
-            if keyword in self.expansion_cache:
-                expanded_terms.update(self.expansion_cache[keyword])
                 continue
             
             # 1. Recupera chunks simili
@@ -81,10 +74,6 @@ class TermExpander:
                 if self.embed_model:
                     neighbors = self._find_semantic_neighbors(keyword, similar_chunks)
                     expanded_terms.update(neighbors)
-                
-                # Cache risultato
-                keyword_expansions = co_occurring + neighbors if self.embed_model else co_occurring
-                self.expansion_cache[keyword] = keyword_expansions[:5]
         
         # 4. Aggiungi espansioni di dominio
         domain_terms = self._get_domain_expansions(keywords)

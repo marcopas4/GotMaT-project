@@ -1,3 +1,3 @@
-from .settings import RAGConfig, IndexType, ResponseMode, EmbeddingConfig
+from .settings import RAGConfig, ResponseMode, EmbeddingConfig
 
-__all__ = ['RAGConfig', 'IndexType', 'ResponseMode', 'EmbeddingConfig']
+__all__ = ['RAGConfig', 'ResponseMode', 'EmbeddingConfig']
