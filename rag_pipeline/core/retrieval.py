@@ -7,10 +7,8 @@ from llama_index.core import (
     StorageContext
 )
 from llama_index.core.retrievers import AutoMergingRetriever
-from llama_index.core.postprocessor import (
-    SimilarityPostprocessor,
-    LongContextReorder
-)
+# ❌ RIMOSSO: Non serve più con reranker
+# from llama_index.core.postprocessor import LongContextReorder
 from core.jina_reranker import JinaReranker
 import torch
 
@@ -23,12 +21,13 @@ class RetrievalManager:
         self.postprocessors = []
         self.jina_reranker = None
         self.device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+        
         # Inizializza Jina reranker se abilitato
         if self.config.use_reranker:
             try:
                 self.jina_reranker = JinaReranker(
                     model_name="jinaai/jina-reranker-v2-base-multilingual",
-                    device=self.device,  # Apple Silicon M4
+                    device=self.device,
                     use_fp16=True,
                     batch_size=32,
                     max_length=1024
@@ -62,59 +61,81 @@ class RetrievalManager:
         return self.retriever
     
     def setup_postprocessors(self) -> List:
-        """Configura postprocessors per migliorare retrieval"""
+        """
+        Configura postprocessors per query engine
+        
+        NOTA: Con Jina reranker attivo, non servono postprocessors aggiuntivi.
+        Il reranking ML fornisce già l'ordine ottimale dei nodi.
+        
+        Postprocessors come LongContextReorder sono utili SOLO quando
+        il ranking è basato su semplice similarità embedding (no reranker).
+        """
         postprocessors = []
         
-        # Filtro similarity
-        postprocessors.append(
-            SimilarityPostprocessor(similarity_cutoff=0.45)
-        )
-        
-        # Long context reordering
-        postprocessors.append(LongContextReorder())
+        # ❌ NESSUN POSTPROCESSOR con reranker attivo
+        # Motivo: Jina reranker fornisce già ordine ottimale ML-based
         
         self.postprocessors = postprocessors
-        logger.info(f"Configured {len(postprocessors)} postprocessors")
+        logger.info(
+            f"Configured {len(postprocessors)} postprocessors "
+            f"(reranker handles optimal ordering)"
+        )
         
         return postprocessors
     
     def rerank_nodes(self, query: str, nodes: List, top_n: int = 5) -> List:
         """
-        Rerank nodes usando Jina reranker
+        Rerank nodes usando Jina reranker ML model
+        
+        Fornisce ordine ottimale basato su relevance semantica query-document.
+        Nessun postprocessor aggiuntivo necessario dopo questo step.
         
         Args:
-            query: Query string
-            nodes: Lista di nodi da rerankare
+            query: Query string originale
+            nodes: Lista di nodi da rerankare (già dedupplicati)
             top_n: Numero di nodi top da ritornare
             
         Returns:
-            Lista di nodi rerankati
+            Lista di nodi rerankati in ordine ottimale (top_n migliori)
         """
         if not self.jina_reranker or not nodes:
-            return nodes
+            logger.warning("Jina reranker not available or no nodes to rerank")
+            return nodes[:top_n]
         
         try:
             # Prepara documenti per reranking
             documents = [node.get_content() for node in nodes]
             
-            # Rerank con Jina
+            # Rerank con Jina ML model
             response = self.jina_reranker.rerank(
                 query=query,
                 documents=documents,
                 top_n=top_n
             )
             
-            # Riordina nodi secondo i risultati
+            # Riordina nodi secondo i risultati e aggiorna score
             reranked_nodes = []
             for result in response.results:
-                reranked_nodes.append(nodes[result.index])
+                original_node = nodes[result.index]
+                # ✅ Aggiorna score con quello del reranker (più accurato)
+                original_node.score = result.relevance_score
+                reranked_nodes.append(original_node)
             
-            logger.info(f"Reranked {len(nodes)} nodes to top {len(reranked_nodes)}")
+            logger.info(
+                f"Reranked {len(nodes)} nodes → top {len(reranked_nodes)} "
+                f"(scores: {[f'{n.score:.3f}' for n in reranked_nodes[:3]]})"
+            )
             return reranked_nodes
             
         except Exception as e:
-            logger.warning(f"Reranking failed: {e}, returning original nodes")
-            return nodes[:top_n]
+            logger.warning(f"Reranking failed: {e}, returning original nodes sorted by score")
+            # Fallback: ordina per score esistente
+            sorted_nodes = sorted(
+                nodes, 
+                key=lambda n: getattr(n, 'score', 0.0), 
+                reverse=True
+            )
+            return sorted_nodes[:top_n]
     
     def get_reranker_metrics(self):
         """Ottieni metriche del reranker"""

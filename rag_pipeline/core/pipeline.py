@@ -360,9 +360,16 @@ class OptimizedRAGPipeline:
                 
                 for i, q in enumerate(queries):
                     try:
-                        retriever = self.index.as_retriever(
-                            similarity_top_k=self.config.similarity_top_k
-                        )
+                        # Verifica che retriever sia configurato
+                        if not self.retrieval_manager.retriever:
+                            logger.warning("Retriever not configured, using fallback")
+                            # Fallback a retrieval base
+                            retriever = self.index.as_retriever(
+                                similarity_top_k=self.config.similarity_top_k
+                            )
+                        else:
+                            retriever = self.retrieval_manager.retriever
+
                         nodes = retriever.retrieve(q)
                         all_nodes.extend(nodes)
                         
