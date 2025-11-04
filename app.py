@@ -91,14 +91,224 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+def handle_file_upload(uploaded_files):
+    """Gestisce l'upload dei file"""
+    if not uploaded_files:
+        return
+    
+    successful_uploads = []
+    failed_uploads = []
+    
+    upload_dir = Path("data/uploads")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    
+    for uploaded_file in uploaded_files:
+        try:
+            file_path = upload_dir / uploaded_file.name
+            with open(file_path, "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            
+            file_type = get_file_type(uploaded_file.name)
+            
+            successful_uploads.append({
+                'filename': uploaded_file.name,
+                'file_type': file_type,
+                'file_path': str(file_path),
+                'size': uploaded_file.size
+            })
+                
+        except Exception as e:
+            failed_uploads.append({
+                'filename': uploaded_file.name,
+                'error': str(e)
+            })
+    
+    # Aggiorna lo stato
+    st.session_state.uploaded_files_info.extend(successful_uploads)
+    
+    # ✅ COSTRUISCI L'INDICE SUBITO
+    if successful_uploads:
+        try:
+            with st.spinner("📚 Indicizzando documenti con RAG pipeline..."):
+                file_paths = [doc['file_path'] for doc in st.session_state.uploaded_files_info]
+                
+                # Build index con TUTTI i file
+                st.session_state.rag_pipeline.build_index(file_paths=file_paths)
+                
+                # Setup query engine
+                st.session_state.rag_pipeline.setup_query_engine()
+                
+                # Flag che l'indice è pronto
+                st.session_state.index_ready = True
+                
+            st.success(f"✅ {len(successful_uploads)} documenti indicizzati!")
+            
+        except Exception as e:
+            st.error(f"❌ Errore indicizzazione: {e}")
+            return
+    
+    # Mostra risultati
+    if successful_uploads:
+        st.markdown('<div class="status-box status-success">✅ Documenti caricati:</div>', unsafe_allow_html=True)
+        for doc in successful_uploads:
+            st.write(f"• {doc['filename']} ({doc['file_type']})")
+    
+    if failed_uploads:
+        st.markdown('<div class="status-box status-error">❌ Errori:</div>', unsafe_allow_html=True)
+        for doc in failed_uploads:
+            st.write(f"• {doc['filename']}: {doc['error']}")
+
+def handle_query(query: str):
+    """Gestisce le query dell'utente"""
+    if not query.strip():
+        return
+    
+    # Verifica documenti caricati
+    if not st.session_state.uploaded_files_info:
+        st.error("⚠️ Carica almeno un documento prima di fare domande!")
+        return
+    
+    # ✅ VERIFICA CHE L'INDICE SIA PRONTO
+    if not st.session_state.get('index_ready', False):
+        st.error("⚠️ Indice non costruito. Ricarica i documenti.")
+        return
+    
+    # Aggiungi messaggio utente
+    st.session_state.messages.append({
+        "role": "user",
+        "content": query,
+        "timestamp": ""
+    })
+    
+    try:
+        with st.spinner("🤔 Elaborando la tua domanda..."):
+            # ✅ SOLO QUERY (indice già costruito)
+            result = st.session_state.rag_pipeline.query(
+                query, 
+                enhance_query=True
+            )
+            
+            response = result.get('answer', 'Nessuna risposta generata')
+            sources = result.get('sources', [])
+            metadata = result.get('query_metadata', {})
+            
+            # Aggiungi risposta
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": response,
+                "sources": sources,
+                "metadata": metadata,
+                "response_time": result.get('response_time', 0),
+                "timestamp": ""
+            })
+    
+    except Exception as e:
+        st.error(f"❌ Errore: {str(e)}")
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": f"Mi dispiace, si è verificato un errore: {str(e)}",
+            "timestamp": ""
+        })
+
+def display_chat_history():
+    """Mostra la cronologia della chat con metadata dettagliati"""
+    for message in st.session_state.messages:
+        if message["role"] == "user":
+            st.markdown(f"""
+            <div class="chat-message user-message">
+                <strong>🧑 Tu:</strong> {message["content"]}
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.markdown(f"""
+            <div class="chat-message assistant-message">
+                <strong>🤖 Assistente:</strong> {format_response(message["content"])}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # ✅ MOSTRA METADATA DETTAGLIATI (come nel main.py)
+            if "metadata" in message and message["metadata"]:
+                metadata = message["metadata"]
+                
+                with st.expander("🔍 Query Analysis & Pipeline Details"):
+                    # Query Analysis
+                    if 'expansions' in metadata:
+                        st.markdown("**🔍 Query Analysis:**")
+                        exp = metadata['expansions']
+                        
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            if 'intent' in exp:
+                                st.info(f"**Intent:** {exp['intent']}")
+                            if 'keywords' in exp and exp['keywords']:
+                                keywords = ', '.join(exp['keywords'][:5])
+                                st.info(f"**Keywords:** {keywords}")
+                        
+                        with col2:
+                            if 'semantic_variants' in exp:
+                                st.info(f"**Semantic variants:** {len(exp['semantic_variants'])}")
+                            if 'num_queries_generated' in metadata:
+                                st.info(f"**Total queries:** {metadata['num_queries_generated']}")
+                    
+                    st.divider()
+                    
+                    # Retrieval Pipeline
+                    st.markdown("**📊 Retrieval Pipeline:**")
+                    
+                    # Step 1: Retrieval
+                    if 'retrieval' in metadata:
+                        ret = metadata['retrieval']
+                        nodes = ret.get('total_nodes_retrieved', 0)
+                        st.success(f"**1. Multi-retrieval:** {nodes} nodes retrieved")
+                    
+                    # Step 2: Deduplication
+                    if 'deduplication' in metadata:
+                        dedup = metadata['deduplication']
+                        before = dedup.get('nodes_before', 0)
+                        after = dedup.get('nodes_after', 0)
+                        removed = dedup.get('duplicates_removed', 0)
+                        st.success(f"**2. Deduplication:** {before} → {after} nodes (-{removed} duplicates)")
+                    
+                    # Step 3: Reranking
+                    if 'reranking' in metadata:
+                        rerank = metadata['reranking']
+                        if rerank.get('applied'):
+                            before = rerank.get('nodes_before', 0)
+                            after = rerank.get('nodes_after', 0)
+                            st.success(f"**3. Reranking:** {before} → {after} top nodes ✓")
+                        else:
+                            st.warning("**3. Reranking:** Not applied")
+                    
+                    # Performance
+                    if 'response_time' in message:
+                        st.divider()
+                        st.metric("⚡ Total time", f"{message['response_time']:.3f}s")
+            
+            # ✅ MOSTRA FONTI
+            if "sources" in message and message["sources"]:
+                with st.expander(f"📚 Top Sources ({len(message['sources'])} total)"):
+                    for i, source in enumerate(message['sources'][:3], 1):
+                        st.markdown(f"**[{i}] Score: {source['score']:.3f}**")
+                        st.text(source['text'][:200] + "...")
+                        
+                        if source.get('metadata'):
+                            st.caption(f"📄 {source['metadata'].get('file_name', 'N/A')}")
+                        
+                        if source.get('reranked'):
+                            st.success("✓ Reranked")
+                        
+                        st.divider()
+
 def initialize_session_state():
     """Inizializza lo stato della sessione"""
     if 'messages' not in st.session_state:
         st.session_state.messages = []
     if 'uploaded_files_info' not in st.session_state:
-        st.session_state.uploaded_files_info = []  # Lista di dict con info file
+        st.session_state.uploaded_files_info = []
     if 'rag_pipeline' not in st.session_state:
         st.session_state.rag_pipeline = None
+    if 'index_ready' not in st.session_state:
+        st.session_state.index_ready = False
 
 def initialize_components():
     """Inizializza i componenti principali"""
@@ -121,121 +331,6 @@ def initialize_components():
     except Exception as e:
         st.error(f"Errore nell'inizializzazione: {str(e)}")
         return False
-
-def handle_file_upload(uploaded_files):
-    """Gestisce l'upload dei file - Salva solo le info, non processa subito"""
-    if not uploaded_files:
-        return
-    
-    successful_uploads = []
-    failed_uploads = []
-    
-    # Directory per salvare i file uploadati
-    upload_dir = Path("data/uploads")
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    
-    for uploaded_file in uploaded_files:
-        try:
-            # Salva il file nella directory uploads
-            file_path = upload_dir / uploaded_file.name
-            with open(file_path, "wb") as f:
-                f.write(uploaded_file.getbuffer())
-            
-            # Determina il tipo di file
-            file_type = get_file_type(uploaded_file.name)
-            
-            successful_uploads.append({
-                'filename': uploaded_file.name,
-                'file_type': file_type,
-                'file_path': str(file_path),
-                'size': uploaded_file.size
-            })
-                
-        except Exception as e:
-            failed_uploads.append({
-                'filename': uploaded_file.name,
-                'error': str(e)
-            })
-    
-    # Aggiorna lo stato
-    st.session_state.uploaded_files_info.extend(successful_uploads)
-    
-    # Mostra risultati
-    if successful_uploads:
-        st.markdown('<div class="status-box status-success">✅ Documenti caricati con successo:</div>', unsafe_allow_html=True)
-        for doc in successful_uploads:
-            st.write(f"• {doc['filename']} ({doc['file_type']})")
-    
-    if failed_uploads:
-        st.markdown('<div class="status-box status-error">❌ Errori nel caricamento:</div>', unsafe_allow_html=True)
-        for doc in failed_uploads:
-            st.write(f"• {doc['filename']}: {doc['error']}")
-
-def handle_query(query: str):
-    """Gestisce le query dell'utente usando la RAG pipeline"""
-    if not query.strip():
-        return
-    
-    # Verifica che ci siano documenti caricati
-    if not st.session_state.uploaded_files_info:
-        st.error("⚠️ Devi caricare almeno un documento prima di fare domande!")
-        return
-    
-    # Aggiungi messaggio utente alla cronologia
-    st.session_state.messages.append({
-        "role": "user",
-        "content": query,
-        "timestamp": ""
-    })
-    
-    try:
-        with st.spinner("Elaborando la tua domanda..."):
-            # Estrai i file paths dai documenti caricati
-            file_paths = [doc['file_path'] for doc in st.session_state.uploaded_files_info]
-            
-            # Build index con i file caricati
-            st.session_state.rag_pipeline.build_index(file_paths=file_paths)
-            
-            # Setup query engine
-            st.session_state.rag_pipeline.setup_query_engine()
-            
-            # Esegui la query
-            result = st.session_state.rag_pipeline.query(query, enhance_query=True)
-            
-            response = result.get('answer', 'Nessuna risposta generata')
-            sources = result.get('sources', [])
-            
-            # Aggiungi risposta alla cronologia
-            st.session_state.messages.append({
-                "role": "assistant",
-                "content": response,
-                "sources": sources,
-                "timestamp": ""
-            })
-    
-    except Exception as e:
-        st.error(f"Errore nell'elaborazione della query: {str(e)}")
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": f"Mi dispiace, si è verificato un errore: {str(e)}",
-            "timestamp": ""
-        })
-
-def display_chat_history():
-    """Mostra la cronologia della chat"""
-    for message in st.session_state.messages:
-        if message["role"] == "user":
-            st.markdown(f"""
-            <div class="chat-message user-message">
-                <strong>Tu:</strong> {message["content"]}
-            </div>
-            """, unsafe_allow_html=True)
-        else:
-            st.markdown(f"""
-            <div class="chat-message assistant-message">
-                <strong>Assistente:</strong> {format_response(message["content"])}
-            </div>
-            """, unsafe_allow_html=True)
 
 def main():
     """Funzione principale dell'applicazione"""
@@ -266,6 +361,7 @@ def main():
         
         if st.button("📤 Carica Documenti", disabled=not uploaded_files):
             handle_file_upload(uploaded_files)
+            st.rerun()
         
         # Mostra documenti caricati
         if st.session_state.uploaded_files_info:
@@ -277,14 +373,55 @@ def main():
         
         st.divider()
         
-        # Statistiche
-        st.subheader("📊 Statistiche")
-        st.metric("Documenti caricati", len(st.session_state.uploaded_files_info))
-        st.metric("Messaggi nella chat", len(st.session_state.messages))
+        # ✅ STATISTICHE PIPELINE (come nel main.py)
+        st.subheader("📊 Statistiche Pipeline")
         
-        # Pulsante per resettare tutto
+        if st.session_state.rag_pipeline and st.session_state.get('index_ready', False):
+            try:
+                stats = st.session_state.rag_pipeline.get_statistics()
+                
+                # Performance
+                perf = stats.get('performance', {})
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Query totali", perf.get('total_queries', 0))
+                with col2:
+                    st.metric("Tempo medio", f"{perf.get('avg_response_time', 0):.2f}s")
+                
+                # Data
+                data = stats.get('data', {})
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.metric("Documenti", data.get('total_documents', 0))
+                with col2:
+                    st.metric("Nodi", data.get('total_nodes', 0))
+                
+                # Retrieval stats
+                if 'retrieval_stats' in stats:
+                    rs = stats['retrieval_stats']
+                    with st.expander("📈 Retrieval Statistics"):
+                        st.metric("Avg nodes retrieved", f"{rs.get('avg_nodes_retrieved', 0):.1f}")
+                        st.metric("Avg dedup reduction", f"{rs.get('avg_dedup_reduction', 0)*100:.1f}%")
+                
+                # Configuration
+                with st.expander("⚙️ Configurazione"):
+                    config = stats.get('configuration', {})
+                    st.json({
+                        "LLM": config.get('llm_model', 'N/A'),
+                        "Embedding": config.get('embedding_model', 'N/A'),
+                        "Index": config.get('index_type', 'N/A'),
+                        "Reranker": "✅" if config.get('reranker_enabled') else "❌"
+                    })
+            
+            except Exception as e:
+                st.error(f"Errore nel recupero statistiche: {e}")
+        else:
+            st.info("Carica documenti per vedere le statistiche")
+        
+        st.divider()
+        
+        # Pulsante reset
         if st.button("🔄 Reset Sessione"):
-            # Elimina i file caricati
             upload_dir = Path("data/uploads")
             if upload_dir.exists():
                 for file_info in st.session_state.uploaded_files_info:
@@ -295,9 +432,10 @@ def main():
             st.session_state.uploaded_files_info = []
             st.session_state.messages = []
             st.session_state.rag_pipeline = None
+            st.session_state.index_ready = False
             st.success("✅ Sessione resettata!")
             st.rerun()
-    
+
     # Area principale - inizializzazione componenti
     if not initialize_components():
         st.stop()
