@@ -1,11 +1,19 @@
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.resolve()))
+sys.path.append(str((Path(__file__).parent / "rag_pipeline").resolve()))
+sys.path.append(str((Path(__file__).parent / "app_skeleton").resolve()))
+
+
 import streamlit as st
 import os
 import tempfile
 from typing import List, Dict, Any
-from pathlib import Path
+
 from app_skeleton.src.utils import get_file_type, format_response
-from rag_pipeline.core.pipeline import OptimizedRAGPipeline
 from rag_pipeline.config.settings import RAGConfig
+from rag_pipeline.core.pipeline import OptimizedRAGPipeline
+
 # Configurazione pagina
 st.set_page_config(
     page_title="RAG Prefettura - Assistente per Illeciti Amministrativi",
