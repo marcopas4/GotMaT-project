@@ -44,7 +44,7 @@ class RAGConfig:
     storage_path: str = str(_PROJECT_ROOT / "storage")
     
     # LLM Settings
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     temperature: float = 0.3
     context_window: int = 4096
     

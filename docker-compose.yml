@@ -1,0 +1,79 @@
+services:
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: rag-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    # Se non hai GPU, commenta il blocco deploy sopra
+    # e decommenta questa linea:
+    # command: serve
+
+  # RAG Streamlit Application
+  rag-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: rag-streamlit-app
+    restart: unless-stopped
+    ports:
+      - "8501:8501"
+    volumes:
+      # Monta directory per persistenza dati
+      - ./data:/app/data
+      - ./storage:/app/storage
+      - ./logs:/app/logs
+      - ./evaluation:/app/evaluation
+      # Monta codice per sviluppo (rimuovi in produzione)
+      - ./app.py:/app/app.py
+      - ./rag_pipeline:/app/rag_pipeline
+      - ./app_skeleton:/app/app_skeleton
+    environment:
+      # Configurazione Ollama
+      - OLLAMA_BASE_URL=http://ollama:11434
+      # Configurazione logging
+      - LOG_LEVEL=INFO
+      # Ottimizzazioni Python
+      - PYTHONUNBUFFERED=1
+      - STREAMLIT_SERVER_HEADLESS=true
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - rag-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  rag-network:
+    driver: bridge
+    name: rag-network
+
+volumes:
+  ollama_data:
+    name: rag-ollama-data
+    driver: local
