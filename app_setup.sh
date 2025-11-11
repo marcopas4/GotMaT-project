@@ -8,6 +8,9 @@ set -e
 echo "🚀 RAG Prefettura - Setup Script"
 echo "================================="
 echo ""
+echo "Utilizzo: ./app_setup.sh [--build | -b]"
+echo "  --build, -b : Ricostruisce l'immagine Docker prima di avviare"
+echo ""
 
 # Colori per output
 GREEN='\033[0;32m'
@@ -25,9 +28,16 @@ fi
 echo -e "${GREEN}✅ Docker è in esecuzione${NC}"
 echo ""
 
+# Controlla se è richiesto il rebuild
+BUILD_FLAG=""
+if [[ "$1" == "--build" ]] || [[ "$1" == "-b" ]]; then
+    echo -e "${YELLOW}🔨 Rebuild immagine Docker richiesto...${NC}"
+    BUILD_FLAG="--build"
+fi
+
 # Avvia i container
 echo "📦 Avvio container con docker compose..."
-docker compose up -d
+docker compose up -d $BUILD_FLAG
 
 echo ""
 echo "⏳ Attendo che Ollama sia pronto..."

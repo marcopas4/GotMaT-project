@@ -28,10 +28,13 @@ Guida completa per eseguire l'applicazione RAG Prefettura con Docker.
 cd /path/to/rag-prefettura
 
 # 2. Rendi eseguibile lo script di setup
-chmod +x setup.sh
+chmod +x app_setup.sh
 
 # 3. Esegui il setup automatico
-./setup.sh
+./app_setup.sh
+
+# 4. Se hai modificato codice Python, usa --build per ricostruire l'immagine
+./app_setup.sh --build
 ```
 
 ### Windows
@@ -41,7 +44,11 @@ REM 1. Apri PowerShell o CMD nella directory del progetto
 cd C:\path\to\rag-prefettura
 
 REM 2. Esegui lo script di setup
-setup.bat
+app_setup.bat
+
+REM 3. Se hai modificato codice Python, ricostruisci manualmente l'immagine
+docker compose build rag-app
+docker compose up -d
 ```
 
 ### Avvio Manuale
@@ -50,10 +57,10 @@ Se preferisci configurare manualmente:
 
 ```bash
 # 1. Avvia i container
-docker-compose up -d
+docker compose up -d
 
 # 2. Attendi che Ollama sia pronto (circa 10 secondi)
-docker-compose logs -f ollama
+docker compose logs -f ollama
 
 # 3. Scarica il modello LLM
 docker exec rag-ollama ollama pull llama3.2:3b-instruct-q4_K_M
@@ -142,29 +149,29 @@ STREAMLIT_SERVER_MAX_UPLOAD_SIZE=200
 
 ```bash
 # Avvia i servizi
-docker-compose up -d
+docker compose up -d
 
 # Ferma i servizi
-docker-compose down
+docker compose down
 
 # Riavvia un servizio specifico
-docker-compose restart rag-app
+docker compose restart rag-app
 
 # Ferma e rimuovi tutto (inclusi volumi)
-docker-compose down -v
+docker compose down -v
 ```
 
 ### Monitoraggio
 
 ```bash
 # Vedi log in tempo reale
-docker-compose logs -f
+docker compose logs -f
 
 # Log di un servizio specifico
-docker-compose logs -f rag-app
+docker compose logs -f rag-app
 
 # Stato dei container
-docker-compose ps
+docker compose ps
 
 # Risorse utilizzate
 docker stats
@@ -207,7 +214,7 @@ docker exec rag-ollama ollama run llama3.2:3b-instruct-q4_K_M "Ciao, come stai?"
 curl http://localhost:8501/_stcore/health
 
 # Log dell'app
-docker-compose logs rag-app | tail -50
+docker compose logs rag-app | tail -50
 ```
 
 ---
@@ -218,22 +225,22 @@ docker-compose logs rag-app | tail -50
 
 ```bash
 # Controlla stato
-docker-compose ps ollama
+docker compose ps ollama
 
 # Vedi log per errori
-docker-compose logs ollama
+docker compose logs ollama
 
 # Riavvia il servizio
-docker-compose restart ollama
+docker compose restart ollama
 
 # Se persiste, ricrea il container
-docker-compose up -d --force-recreate ollama
+docker compose up -d --force-recreate ollama
 ```
 
 ### Problema: App non si connette a Ollama
 
 Verifica che:
-1. Ollama sia attivo: `docker-compose ps`
+1. Ollama sia attivo: `docker compose ps`
 2. Network sia corretto: `docker network inspect rag-network`
 3. Variabile ambiente: `OLLAMA_BASE_URL=http://ollama:11434`
 
@@ -323,10 +330,10 @@ tar xzf rag-data-backup.tar.gz
 
 ```bash
 # Pull ultime versioni
-docker-compose pull
+docker compose pull
 
 # Ricrea container
-docker-compose up -d --force-recreate
+docker compose up -d --force-recreate
 
 # Rimuovi immagini vecchie
 docker image prune -a
@@ -334,15 +341,25 @@ docker image prune -a
 
 ### Aggiorna Codice
 
+Se hai modificato file Python (come `app.py` o moduli in `rag_pipeline/`):
+
+```bash
+# Metodo 1: Usa lo script con flag --build (o -b)
+./app_setup.sh --build
+
+# Metodo 2: Rebuild manuale
+docker compose build rag-app
+docker compose up -d
+```
+
+Se hai solo aggiornato il codice da git senza modifiche:
+
 ```bash
 # Pull codice da git
 git pull origin main
 
-# Rebuild immagine app
-docker-compose build rag-app
-
-# Riavvia
-docker-compose up -d
+# Rebuild immagine
+./app_setup.sh -b
 ```
 
 ### Pulizia Sistema
@@ -398,8 +415,8 @@ Per ottimizzare su CPU:
 
 ```bash
 # Abilita debug logging
-docker-compose down
-docker-compose up  # Senza -d per vedere output in tempo reale
+docker compose down
+docker compose up  # Senza -d per vedere output in tempo reale
 ```
 
 ### Informazioni Sistema
@@ -407,7 +424,7 @@ docker-compose up  # Senza -d per vedere output in tempo reale
 ```bash
 # Info Docker
 docker version
-docker-compose version
+docker compose version
 
 # Info sistema
 docker info
@@ -419,7 +436,7 @@ docker stats --no-stream
 ### Report Issue
 
 Quando segnali un problema, includi:
-1. Output di `docker-compose logs`
+1. Output di `docker compose logs`
 2. Configurazione sistema (`docker info`)
 3. Versione Docker (`docker version`)
 4. File `docker-compose.yml` (se modificato)
