@@ -29,12 +29,13 @@ logger = logging.getLogger(__name__)
 class OptimizedRAGPipeline:
     """Pipeline RAG principale che coordina tutti i componenti"""
     
-    def __init__(self, config: RAGConfig = None):
+    def __init__(self, config: RAGConfig = None, llm=None):
         """
         Inizializza pipeline con configurazione
         
         Args:
             config: Configurazione RAG (usa default se None)
+            llm: LLM preconfigurato (opzionale, condiviso)
         """
         self.config = config or RAGConfig()
         
@@ -44,7 +45,7 @@ class OptimizedRAGPipeline:
         # FLAT index - sempre deterministico
         self.faiss_manager = FAISSIndexManager(
             dimension=self.embedding_manager.config.dimension,
-            index_type="Flat"  # Hardcoded per FLAT
+            index_type="Flat"
         )
         
         self.document_processor = DocumentProcessor(
@@ -56,8 +57,13 @@ class OptimizedRAGPipeline:
         # Query processor per enhancement
         self.query_processor = None
         
-        # Inizializza LLM
-        self._setup_llm()
+        # ✅ USA LLM CONDIVISO O INIZIALIZZANE UNO NUOVO
+        if llm is not None:
+            self.llm = llm
+            logger.info("Using shared LLM instance")
+        else:
+            # Inizializza LLM
+            self._setup_llm()
         
         # Configura settings globali
         self._configure_global_settings()
@@ -86,7 +92,7 @@ class OptimizedRAGPipeline:
             logger.info("Jina reranker enabled")
     
     def _setup_llm(self):
-        """Configura LLM Ollama"""
+        """Configura LLM Ollama - SENZA system prompt per RAG"""
         self.llm = Ollama(
             model=self.config.llm_model,
             base_url=self.config.ollama_base_url,
@@ -100,8 +106,9 @@ class OptimizedRAGPipeline:
                 "top_k": 40,
                 "top_p": 0.9
             }
+            # ✅ NO system_prompt - il RAG usa il contesto recuperato
         )
-        logger.info(f"LLM configured: {self.config.llm_model}")
+        logger.info(f"LLM configured for RAG: {self.config.llm_model}")
     
     def _configure_global_settings(self):
         """Configura settings globali LlamaIndex"""
@@ -212,30 +219,63 @@ class OptimizedRAGPipeline:
         
         logger.info(f"Query engine configured with mode: {response_mode.value}")
     
-    def _jaccard_similarity(self, text1: str, text2: str) -> float:
+    
+    def _compute_text_hash(self, text: str) -> int:
         """
-        Calcola Jaccard similarity tra due testi
+        Calcola SimHash del testo per deduplication veloce
         
         Args:
-            text1: Primo testo
-            text2: Secondo testo
+            text: Testo da hashare
             
         Returns:
-            Jaccard similarity score [0, 1]
+            Hash intero del testo (64-bit fingerprint)
         """
-        # Tokenizza e converti in set
-        tokens1 = set(text1.lower().split())
-        tokens2 = set(text2.lower().split())
+        import hashlib
         
-        # Calcola intersezione e unione
-        intersection = tokens1.intersection(tokens2)
-        union = tokens1.union(tokens2)
+        tokens = text.lower().split()
         
-        # Evita divisione per zero
-        if len(union) == 0:
-            return 0.0
+        # Crea vettore di bit
+        hash_bits = 64
+        v = [0] * hash_bits
         
-        return len(intersection) / len(union)
+        for token in tokens:
+            # Hash del token
+            h = int(hashlib.md5(token.encode()).hexdigest(), 16)
+            
+            # Aggiorna vettore
+            for i in range(hash_bits):
+                if h & (1 << i):
+                    v[i] += 1
+                else:
+                    v[i] -= 1
+        
+        # Converti in hash finale
+        fingerprint = 0
+        for i in range(hash_bits):
+            if v[i] > 0:
+                fingerprint |= (1 << i)
+        
+        return fingerprint
+    
+    def _hamming_distance(self, hash1: int, hash2: int) -> int:
+        """
+        Calcola Hamming distance tra due hash
+        
+        Args:
+            hash1: Primo hash
+            hash2: Secondo hash
+            
+        Returns:
+            Hamming distance (numero di bit diversi)
+        """
+        xor = hash1 ^ hash2
+        distance = 0
+        
+        for i in range(64):
+            if xor & (1 << i):
+                distance += 1
+        
+        return distance
     
     def _deduplicate_nodes(
         self,
@@ -243,11 +283,11 @@ class OptimizedRAGPipeline:
         similarity_threshold: float = 0.85
     ) -> List:
         """
-        Rimuove nodi duplicati usando Jaccard similarity
+        Rimuove nodi duplicati usando SimHash con Hamming distance
         
         Args:
             nodes: Lista di nodi da dedupplicare
-            similarity_threshold: Soglia di similarità per considerare duplicati
+            similarity_threshold: Soglia di similarità [0, 1]
             
         Returns:
             Lista di nodi dedupplicati
@@ -257,18 +297,24 @@ class OptimizedRAGPipeline:
         
         dedup_start = time.time()
         unique_nodes = []
-        seen_texts = []
+        seen_hashes = []
         duplicates_removed = 0
+        
+        # Calcola max Hamming distance dalla threshold
+        hash_bits = 64
+        max_hamming = int(hash_bits * (1 - similarity_threshold))
         
         for node in nodes:
             node_text = node.text
+            node_hash = self._compute_text_hash(node_text)
+            
             is_duplicate = False
             
-            # Confronta con tutti i nodi già visti
-            for seen_text in seen_texts:
-                similarity = self._jaccard_similarity(node_text, seen_text)
+            # Confronta con hash già visti
+            for seen_hash in seen_hashes:
+                distance = self._hamming_distance(node_hash, seen_hash)
                 
-                if similarity >= similarity_threshold:
+                if distance <= max_hamming:
                     is_duplicate = True
                     duplicates_removed += 1
                     break
@@ -276,12 +322,12 @@ class OptimizedRAGPipeline:
             # Aggiungi solo se non è duplicato
             if not is_duplicate:
                 unique_nodes.append(node)
-                seen_texts.append(node_text)
+                seen_hashes.append(node_hash)
         
         dedup_time = time.time() - dedup_start
         
         logger.info(
-            f"Deduplication: {len(nodes)} → {len(unique_nodes)} nodes "
+            f"Deduplication (SimHash): {len(nodes)} → {len(unique_nodes)} nodes "
             f"({duplicates_removed} duplicates removed, "
             f"threshold={similarity_threshold}, "
             f"time={dedup_time:.3f}s)"
@@ -296,7 +342,7 @@ class OptimizedRAGPipeline:
         Flusso:
         1. Espandi query in multiple varianti
         2. Retrieval per ogni query
-        3. Deduplicazione con Jaccard similarity
+        3. Deduplicazione con SimHash
         4. Reranking con Jina
         5. Synthesis della risposta
         
@@ -316,6 +362,9 @@ class OptimizedRAGPipeline:
         # Setup query engine se necessario
         if not self.query_engine:
             self.setup_query_engine()
+        
+        # ✅ VERIFICA CHE similarity_top_k ESISTA
+        similarity_top_k = getattr(self.config, 'similarity_top_k', 10)
         
         # Metadata tracking
         query_metadata = {
@@ -360,12 +409,11 @@ class OptimizedRAGPipeline:
                 
                 for i, q in enumerate(queries):
                     try:
-                        # Verifica che retriever sia configurato
+                        # ✅ MIGLIORA GESTIONE FALLBACK RETRIEVER
                         if not self.retrieval_manager.retriever:
-                            logger.warning("Retriever not configured, using fallback")
-                            # Fallback a retrieval base
+                            logger.warning("Retriever not configured, creating fallback retriever")
                             retriever = self.index.as_retriever(
-                                similarity_top_k=self.config.similarity_top_k
+                                similarity_top_k=similarity_top_k
                             )
                         else:
                             retriever = self.retrieval_manager.retriever
@@ -391,7 +439,7 @@ class OptimizedRAGPipeline:
                 
                 logger.info(f"Multi-retrieval: {len(all_nodes)} total nodes from {len(queries)} queries in {retrieval_time:.3f}s")
                 
-                # STEP 3: Deduplication con Jaccard Similarity
+                # STEP 3: Deduplication con SimHash
                 if all_nodes:
                     dedup_threshold = getattr(self.config, "dedup_threshold", 0.85)
                     unique_nodes = self._deduplicate_nodes(all_nodes, dedup_threshold)
@@ -413,11 +461,11 @@ class OptimizedRAGPipeline:
                         rerank_start = time.time()
                         original_count = len(all_nodes)
                         
-                        # Rerank dei nodi dedupplicati
+                        # ✅ USA similarity_top_k VERIFICATO
                         reranked_nodes = self.retrieval_manager.rerank_nodes(
                             query=question,
                             nodes=all_nodes,
-                            top_n=min(self.config.similarity_top_k, len(all_nodes))
+                            top_n=min(similarity_top_k, len(all_nodes))
                         )
                         
                         rerank_time = time.time() - rerank_start

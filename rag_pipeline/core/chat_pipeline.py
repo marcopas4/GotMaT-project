@@ -50,17 +50,17 @@ FORMATO RISPOSTE:
 
 Ricorda: sei uno strumento di supporto informativo, non sostituisci la consulenza di un avvocato o professionista legale."""
     
-    def __init__(self, config: RAGConfig = None):
+    def __init__(self, config: RAGConfig, llm=None):
         """
         Inizializza ChatPipeline con configurazione.
         
         Args:
             config: Configurazione RAG (riutilizzata per LLM settings)
+            llm: LLM preconfigurato (opzionale)
         """
         self.config = config or RAGConfig()
-        
-        # Setup LLM
-        self._setup_llm()
+        # ✅ USA LLM PASSATO O CREANE UNO NUOVO
+        self.llm = llm if llm is not None else self._initialize_llm()
         
         # Configura settings globali
         self._configure_global_settings()
@@ -75,10 +75,10 @@ Ricorda: sei uno strumento di supporto informativo, non sostituisci la consulenz
         logger.info(f"ChatPipeline initialized with model: {self.config.llm_model}")
         logger.info("Specializzazione: Diritto amministrativo e illeciti amministrativi")
     
-    def _setup_llm(self):
+    def _initialize_llm(self):
         """Configura LLM Ollama con parametri ottimizzati per chat"""
         try:
-            self.llm = Ollama(
+            llm = Ollama(
                 model=self.config.llm_model,
                 base_url=self.config.ollama_base_url,
                 temperature=self.config.temperature,
@@ -90,10 +90,11 @@ Ricorda: sei uno strumento di supporto informativo, non sostituisci la consulenz
                     "repeat_penalty": 1.1,
                     "top_k": 40,
                     "top_p": 0.9
-                },
-                system_prompt=self.SYSTEM_PROMPT
+                }
+                # ❌ RIMUOVI system_prompt DA QUI - verrà aggiunto nei messaggi
             )
             logger.info(f"LLM configured: {self.config.llm_model}")
+            return llm
         except Exception as e:
             logger.error(f"Errore nella configurazione LLM: {e}")
             raise
@@ -141,16 +142,23 @@ Ricorda: sei uno strumento di supporto informativo, non sostituisci la consulenz
         start_time = time.time()
         
         try:
-            # Costruisci il prompt completo con cronologia se fornita
-            full_prompt = self._build_prompt(question, conversation_history)
+            # ✅ COSTRUISCI MESSAGGI PER CHAT API
+            messages = self._build_chat_messages(question, conversation_history)
             
             logger.debug(f"Query: '{question[:100]}...'")
             
-            # Esegui completamento
-            response = self.llm.complete(full_prompt)
+            # ✅ USA CHAT INVECE DI COMPLETE
+            from llama_index.core.llms import ChatMessage
+            
+            chat_messages = [
+                ChatMessage(role=msg["role"], content=msg["content"])
+                for msg in messages
+            ]
+            
+            response = self.llm.chat(chat_messages)
             
             # Estrai testo risposta
-            answer = str(response.text) if hasattr(response, 'text') else str(response)
+            answer = str(response.message.content) if hasattr(response, 'message') else str(response)
             
             response_time = time.time() - start_time
             
@@ -187,47 +195,65 @@ Ricorda: sei uno strumento di supporto informativo, non sostituisci la consulenz
                 "error": str(e)
             }
     
-    def _build_prompt(
+    def _build_chat_messages(
         self, 
         question: str, 
         conversation_history: list = None
-    ) -> str:
+    ) -> list:
         """
-        Costruisce il prompt completo includendo cronologia conversazione.
+        Costruisce la lista di messaggi per la chat API.
         
         Args:
             question: Domanda corrente
             conversation_history: Cronologia messaggi precedenti
         
         Returns:
-            Prompt completo formattato
+            Lista di dizionari con formato {"role": str, "content": str}
         """
-        # Se non c'è cronologia, ritorna solo la domanda
-        if not conversation_history:
-            return question
+        messages = []
         
-        # Costruisci prompt con contesto conversazionale
-        prompt_parts = []
+        # ✅ AGGIUNGI SYSTEM PROMPT COME PRIMO MESSAGGIO
+        messages.append({
+            "role": "system",
+            "content": self.SYSTEM_PROMPT
+        })
         
-        # Aggiungi messaggi precedenti (limitati agli ultimi N per context window)
-        max_history = 10  # Limita a 10 scambi precedenti
-        recent_history = conversation_history[-max_history:] if len(conversation_history) > max_history else conversation_history
-        
-        for msg in recent_history:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
+        # ✅ AGGIUNGI CRONOLOGIA (LIMITATA)
+        if conversation_history:
+            max_history = 10  # Limita a 10 scambi precedenti
+            recent_history = conversation_history[-max_history:] if len(conversation_history) > max_history else conversation_history
             
-            if role == "user":
-                prompt_parts.append(f"Utente: {content}")
-            elif role == "assistant":
-                prompt_parts.append(f"Assistente: {content}")
+            for msg in recent_history:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                
+                # Normalizza ruolo per API
+                if role in ["user", "assistant"]:
+                    messages.append({
+                        "role": role,
+                        "content": content
+                    })
         
-        # Aggiungi domanda corrente
-        prompt_parts.append(f"Utente: {question}")
-        prompt_parts.append("Assistente:")
+        # ✅ AGGIUNGI DOMANDA CORRENTE
+        messages.append({
+            "role": "user",
+            "content": question
+        })
         
-        return "\n\n".join(prompt_parts)
+        return messages
     
+    def _build_prompt(
+        self, 
+        question: str, 
+        conversation_history: list = None
+    ) -> str:
+        """
+        [DEPRECATED] Metodo legacy - ora usa _build_chat_messages
+        Mantenuto per compatibilità.
+        """
+        # Non più usato con chat API
+        return question
+
     def _handle_error(self, error: Exception) -> str:
         """
         Gestisce errori e ritorna messaggi user-friendly in italiano.

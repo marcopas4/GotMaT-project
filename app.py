@@ -226,22 +226,37 @@ def handle_query(query: str):
                 })
         
         else:
-            # Modalità Chat
+            # ✅ Modalità Chat - PASSA CRONOLOGIA
             with st.spinner("💭 Pensando..."):
                 if st.session_state.chat_pipeline:
-                    # Usa ChatPipeline
-                    result = st.session_state.chat_pipeline.query(query)
+                    # ✅ COSTRUISCI CRONOLOGIA (escludendo ultimo messaggio utente)
+                    conversation_history = st.session_state[messages_key][:-1]
+                    
+                    # Usa ChatPipeline CON cronologia
+                    result = st.session_state.chat_pipeline.query(
+                        query,
+                        conversation_history=conversation_history
+                    )
+                    
                     response = result.get('answer', 'Nessuna risposta generata')
+                    
+                    # ✅ AGGIUNGI METADATA CHAT
+                    st.session_state[messages_key].append({
+                        "role": "assistant",
+                        "content": response,
+                        "response_time": result.get('response_time', 0),
+                        "model": result.get('model', ''),
+                        "temperature": result.get('temperature', 0),
+                        "timestamp": ""
+                    })
                 else:
                     # Fallback
                     response = "⚠️ ChatPipeline non inizializzato correttamente."
-                
-                # Aggiungi risposta semplice (senza metadata)
-                st.session_state[messages_key].append({
-                    "role": "assistant",
-                    "content": response,
-                    "timestamp": ""
-                })
+                    st.session_state[messages_key].append({
+                        "role": "assistant",
+                        "content": response,
+                        "timestamp": ""
+                    })
     
     except Exception as e:
         st.error(f"❌ Errore: {str(e)}")
@@ -274,8 +289,21 @@ def display_chat_history():
             </div>
             """, unsafe_allow_html=True)
             
-            # Mostra metadata SOLO in modalità RAG
-            if current_mode == "rag" and "metadata" in message and message["metadata"]:
+            # ✅ MOSTRA METADATA ANCHE IN CHAT (ma più semplici)
+            if current_mode == "chat" and "response_time" in message:
+                with st.expander("ℹ️ Info risposta"):
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("⚡ Tempo", f"{message['response_time']:.2f}s")
+                    with col2:
+                        if "model" in message:
+                            st.caption(f"🤖 {message['model']}")
+                    with col3:
+                        if "temperature" in message:
+                            st.caption(f"🌡️ Temp: {message['temperature']}")
+            
+            # Mostra metadata RAG completi
+            elif current_mode == "rag" and "metadata" in message and message["metadata"]:
                 metadata = message["metadata"]
                 
                 with st.expander("🔍 Query Analysis & Pipeline Details"):
@@ -362,6 +390,10 @@ def initialize_session_state():
     
     if 'chat_pipeline' not in st.session_state:
         st.session_state.chat_pipeline = None
+    
+    # ✅ AGGIUNGI: inizializzazione LLM condiviso
+    if 'shared_llm' not in st.session_state:
+        st.session_state.shared_llm = None
 
 def reset_mode_data(mode):
     """Resetta i dati di una specifica modalità"""
@@ -385,33 +417,61 @@ def reset_mode_data(mode):
 def initialize_components():
     """Inizializza i componenti principali in base alla modalità"""
     try:
+        # ✅ CREA CONFIG UNA VOLTA ALL'INIZIO
+        config = RAGConfig(
+            llm_model="llama3.2:3b-instruct-q4_K_M",
+            embedding_model="nomic-ai/nomic-embed-text-v1.5",
+            chunk_sizes=[2048, 512],
+            temperature=0.3,
+            context_window=4096,
+            use_reranker=True,
+            use_automerging=True,
+            chunk_overlap=150
+        )
+        
+        # ✅ INIZIALIZZA LLM UNA SOLA VOLTA USANDO CONFIG
+        if st.session_state.shared_llm is None:
+            with st.spinner("🔧 Inizializzazione LLM condiviso..."):
+                from llama_index.llms.ollama import Ollama
+                
+                st.session_state.shared_llm = Ollama(
+                    model=config.llm_model,
+                    base_url=config.ollama_base_url,  # ✅ Da RAGConfig
+                    temperature=config.temperature,
+                    context_window=config.context_window,
+                    request_timeout=120.0,
+                )
+                
+                st.info(f"🔗 Connesso a Ollama: {config.ollama_base_url}")
+                st.success("✅ LLM condiviso inizializzato!")
+        
         if st.session_state.app_mode == 'rag':
             if st.session_state.rag_pipeline is None:
                 with st.spinner("Inizializzazione RAG Pipeline..."):
-                    config = RAGConfig(
-                        llm_model="llama3.2:3b-instruct-q4_K_M",
-                        embedding_model="nomic-ai/nomic-embed-text-v1.5",
-                        chunk_sizes=[2048, 512],
-                        temperature=0.3,
-                        context_window=4096,
-                        use_reranker=True,
-                        use_automerging=True,
-                        chunk_overlap=150
+                    # ✅ USA STESSO CONFIG + LLM CONDIVISO
+                    st.session_state.rag_pipeline = OptimizedRAGPipeline(
+                        config, 
+                        llm=st.session_state.shared_llm
                     )
-                    st.session_state.rag_pipeline = OptimizedRAGPipeline(config)
         else:
             if st.session_state.chat_pipeline is None:
                 with st.spinner("Inizializzazione Chat Pipeline..."):
-                    config = RAGConfig(
-                        llm_model="llama3.2:3b-instruct-q4_K_M",
-                        temperature=0.3,
-                        context_window=4096
+                    # ✅ CONFIG PIÙ SEMPLICE PER CHAT (stesso LLM)
+                    chat_config = RAGConfig(
+                        llm_model=config.llm_model,
+                        temperature=config.temperature,
+                        context_window=config.context_window
                     )
-                    st.session_state.chat_pipeline = ChatPipeline(config)
+                    st.session_state.chat_pipeline = ChatPipeline(
+                        chat_config,
+                        llm=st.session_state.shared_llm
+                    )
         
         return True
     except Exception as e:
         st.error(f"Errore nell'inizializzazione: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
         return False
 
 def main():
@@ -491,45 +551,29 @@ def main():
             
             st.divider()
             
-            st.subheader("📊 Statistiche RAG")
+            # 🎯 STATISTICHE SEMPLIFICATE - SOLO ESSENZIALI
+            st.subheader("📊 Statistiche Sistema")
             
             if st.session_state.rag_pipeline and st.session_state.get('index_ready', False):
                 try:
                     stats = st.session_state.rag_pipeline.get_statistics()
                     
-                    perf = stats.get('performance', {})
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Query totali", perf.get('total_queries', 0))
-                    with col2:
-                        st.metric("Tempo medio", f"{perf.get('avg_response_time', 0):.2f}s")
-                    
+                    # Solo documenti e nodi totali
                     data = stats.get('data', {})
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("Documenti", data.get('total_documents', 0))
+                        st.metric("📄 Documenti", data.get('total_documents', 0))
                     with col2:
-                        st.metric("Nodi", data.get('total_nodes', 0))
+                        st.metric("🔗 Nodi totali", data.get('total_nodes', 0))
                     
-                    if 'retrieval_stats' in stats:
-                        rs = stats['retrieval_stats']
-                        with st.expander("📈 Retrieval Statistics"):
-                            st.metric("Avg nodes retrieved", f"{rs.get('avg_nodes_retrieved', 0):.1f}")
-                            st.metric("Avg dedup reduction", f"{rs.get('avg_dedup_reduction', 0)*100:.1f}%")
-                    
-                    with st.expander("⚙️ Configurazione"):
-                        config = stats.get('configuration', {})
-                        st.json({
-                            "LLM": config.get('llm_model', 'N/A'),
-                            "Embedding": config.get('embedding_model', 'N/A'),
-                            "Index": config.get('index_type', 'N/A'),
-                            "Reranker": "✅" if config.get('reranker_enabled') else "❌"
-                        })
+                    # Solo query totali
+                    perf = stats.get('performance', {})
+                    st.metric("💬 Query eseguite", perf.get('total_queries', 0))
                 
                 except Exception as e:
-                    st.error(f"Errore nel recupero statistiche: {e}")
+                    st.error(f"Errore statistiche: {e}")
             else:
-                st.info("Carica documenti per vedere le statistiche")
+                st.info("📊 Carica documenti per vedere le statistiche")
             
             st.divider()
             
@@ -543,32 +587,22 @@ def main():
             st.header("💬 Modalità Chat")
             st.info("Chat specializzata in diritto amministrativo italiano e illeciti amministrativi.")
             
-            st.subheader("📊 Statistiche Chat")
+            # 🎯 STATISTICHE SEMPLIFICATE CHAT
+            st.subheader("📊 Statistiche")
+            
             messages_count = len(st.session_state.messages_chat)
-            st.metric("Messaggi totali", messages_count)
+            st.metric("💬 Messaggi", messages_count)
             
             if st.session_state.chat_pipeline:
                 try:
                     stats = st.session_state.chat_pipeline.get_statistics()
                     perf = stats.get('performance', {})
                     
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.metric("Query", perf.get('total_queries', 0))
-                    with col2:
-                        st.metric("Success", perf.get('success_rate', 'N/A'))
-                    
-                    st.metric("Tempo medio", perf.get('avg_response_time', 'N/A'))
-                    
-                    with st.expander("ℹ️ Specializzazione"):
-                        sys_info = stats.get('system_prompt', {})
-                        st.write(f"**Dominio:** {sys_info.get('domain', 'N/A')}")
-                        st.write(f"**Lingua:** {sys_info.get('language', 'N/A')}")
+                    # Solo query totali
+                    st.metric("📝 Query totali", perf.get('total_queries', 0))
                     
                 except Exception as e:
-                    st.warning(f"Statistiche non disponibili: {e}")
-            else:
-                st.warning("⚠️ ChatPipeline non inizializzato")
+                    st.warning(f"⚠️ Statistiche non disponibili")
             
             st.divider()
             
