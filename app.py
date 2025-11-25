@@ -5,12 +5,18 @@ sys.path.append(str((Path(__file__).parent / "rag_pipeline").resolve()))
 sys.path.append(str((Path(__file__).parent / "app_skeleton").resolve()))
 
 import streamlit as st
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+from llama_index.core import Document
 
 from app_skeleton.src.utils import get_file_type, format_response
 from rag_pipeline.config.settings import RAGConfig
 from rag_pipeline.core.pipeline import OptimizedRAGPipeline
 from rag_pipeline.core.chat_pipeline import ChatPipeline
+from rag_pipeline.core.ocr_extractor import PDFTextExtractor
+from PIL import Image
+import pytesseract
+
+
 
 # Configurazione pagina
 st.set_page_config(
@@ -111,8 +117,280 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def handle_file_upload(uploaded_files):
-    """Gestisce l'upload dei file"""
+# ============================================================================
+# 🆕 NUOVE FUNZIONI PER DETECTION ED EXTRACTION
+# ============================================================================
+
+def detect_extraction_method(file_path: str, file_type: str, force_ocr: bool) -> str:
+    """
+    Determina il metodo di estrazione basato su flag OCR e tipo file
+    
+    Args:
+        file_path: Path del file
+        file_type: Tipo file (extension senza punto)
+        force_ocr: Flag da checkbox UI
+    
+    Returns:
+        'ocr' | 'pdf_text' | 'docx' | 'text'
+    """
+    if force_ocr:
+        # Se OCR forzato, usa OCR per tutto tranne TXT/MD
+        if file_type in ['pdf', 'jpg', 'jpeg', 'png']:
+            return 'ocr'
+        elif file_type in ['docx', 'doc']:
+            return 'docx'
+        else:
+            return 'text'
+    else:
+        # Detection automatica
+        if file_type == 'pdf':
+            return 'pdf_text'  # Prova testo prima, fallback OCR
+        elif file_type in ['docx', 'doc']:
+            return 'docx'
+        elif file_type in ['jpg', 'jpeg', 'png']:
+            return 'ocr'  # Immagini sempre OCR
+        elif file_type in ['txt', 'md', 'text', 'markdown']:
+            return 'text'
+        else:
+            raise ValueError(f"Tipo file non supportato: {file_type}")
+
+def is_text_sufficient(text: str, min_chars: int = 100) -> bool:
+    """
+    Verifica se il testo estratto è sufficiente
+    
+    Args:
+        text: Testo da verificare
+        min_chars: Soglia minima caratteri
+    
+    Returns:
+        True se testo sufficiente
+    """
+    return len(text.strip()) > min_chars
+
+def extract_text_from_pdf(file_path: str) -> str:
+    """Estrae testo da PDF usando fitz (PyMuPDF) direttamente"""
+    try:
+        import fitz  # PyMuPDF
+        
+        doc = fitz.open(file_path)
+        text = ""
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            page_text = page.get_text()
+            text += f"\n--- Pagina {page_num + 1} ---\n"
+            text += page_text
+        
+        doc.close()
+        return text.strip()
+        
+    except ImportError:
+        st.error("❌ PyMuPDF (fitz) non installato. Installa con: pip install pymupdf")
+        return ""
+    except Exception as e:
+        st.warning(f"⚠️ Errore estrazione PDF: {e}")
+        return ""
+
+def extract_with_ocr(file_path: str) -> str:
+    """
+    Estrae testo usando OCR (Tesseract) con preprocessing avanzato
+    Usa PDFTextExtractor per gestire PDF e immagini
+    
+    Args:
+        file_path: Path del file
+    
+    Returns:
+        Testo estratto con OCR
+    """
+    try:
+        
+        file_ext = Path(file_path).suffix.lower()
+        
+        if file_ext == '.pdf':
+            # Usa PDFTextExtractor per PDF
+            # Crea directory temporanea per output (richiesta dalla classe)
+            temp_output = Path("data/temp_output")
+            temp_output.mkdir(parents=True, exist_ok=True)
+            
+            # Instanzia extractor
+            extractor = PDFTextExtractor(
+                input_dir=str(Path(file_path).parent),
+                output_dir=str(temp_output),
+                dpi=300,
+                ocr_threshold=50
+            )
+            
+            # Estrai con OCR forzato
+            pages_text = extractor.extract_text_from_pdf(
+                file_path, 
+                force_ocr=True  # Forza OCR per tutte le pagine
+            )
+            
+            # Combina tutte le pagine
+            text = ""
+            for page_num in sorted(pages_text.keys()):
+                text += f"\n--- Pagina {page_num} ---\n"
+                text += pages_text[page_num]
+            
+            return text.strip()
+        
+        else:
+            # Immagini (JPG, PNG) - usa preprocessing della classe
+            temp_output = Path("data/temp_output")
+            temp_output.mkdir(parents=True, exist_ok=True)
+            
+            extractor = PDFTextExtractor(
+                input_dir=str(Path(file_path).parent),
+                output_dir=str(temp_output),
+                dpi=300,
+                ocr_threshold=50
+            )
+            
+            # Carica immagine
+            img = Image.open(file_path)
+            
+            # Usa preprocessing della classe
+            img = extractor.preprocess_image(img)
+            
+            # OCR con Tesseract
+            text = pytesseract.image_to_string(img, lang='ita')
+            return text.strip()
+    
+    except ImportError as e:
+        st.error(f"❌ Dipendenze OCR mancanti: {e}")
+        st.info("Installa con: pip install pytesseract opencv-python pillow pymupdf")
+        return ""
+    except Exception as e:
+        st.warning(f"⚠️ Errore OCR: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return ""
+
+def extract_from_docx(file_path: str) -> str:
+    """
+    Estrae testo da file DOCX
+    
+    Args:
+        file_path: Path del DOCX
+    
+    Returns:
+        Testo estratto
+    """
+    try:
+        from docx import Document as DocxDocument
+        
+        doc = DocxDocument(file_path)
+        
+        text = ""
+        for paragraph in doc.paragraphs:
+            text += paragraph.text + "\n"
+        
+        return text.strip()
+    
+    except ImportError:
+        st.error("❌ python-docx non installato. Installa con: pip install python-docx")
+        return ""
+    except Exception as e:
+        st.warning(f"⚠️ Errore estrazione DOCX: {e}")
+        return ""
+
+def read_text_file(file_path: str) -> str:
+    """
+    Legge file di testo semplice
+    
+    Args:
+        file_path: Path del file
+    
+    Returns:
+        Contenuto del file
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return f.read()
+    except Exception as e:
+        st.warning(f"⚠️ Errore lettura file: {e}")
+        return ""
+
+def extract_and_create_document(file_info: Dict[str, Any], extraction_method: str) -> Tuple[Document, str]:
+    """
+    Estrae testo e crea Document LlamaIndex con metadata completi
+    
+    Args:
+        file_info: Dict con {filename, file_path, file_type, size}
+        extraction_method: Metodo di estrazione da usare
+    
+    Returns:
+        (Document, actual_method) dove actual_method può essere diverso se c'è fallback
+    """
+    file_path = file_info['file_path']
+    filename = file_info['filename']
+    file_type = file_info['file_type']
+    
+    text = ""
+    actual_method = extraction_method
+    
+    # Estrazione basata sul metodo
+    if extraction_method == 'pdf_text':
+        # Tenta estrazione testo prima
+        text = extract_text_from_pdf(file_path)
+        
+        # Smart fallback su OCR se testo insufficiente
+        if not is_text_sufficient(text):
+            st.warning(f"⚠️ {filename}: testo insufficiente, provo OCR...")
+            text = extract_with_ocr(file_path)
+            actual_method = 'pdf_ocr_fallback'
+        else:
+            actual_method = 'pdf_text'
+    
+    elif extraction_method == 'ocr':
+        text = extract_with_ocr(file_path)
+        actual_method = 'ocr'
+    
+    elif extraction_method == 'docx':
+        text = extract_from_docx(file_path)
+        actual_method = 'docx'
+    
+    elif extraction_method == 'text':
+        text = read_text_file(file_path)
+        actual_method = 'text'
+    
+    else:
+        raise ValueError(f"Metodo di estrazione non valido: {extraction_method}")
+    
+    # Verifica che ci sia testo
+    if not text or len(text.strip()) < 10:
+        raise ValueError(f"Testo estratto insufficiente (< 10 caratteri)")
+    
+    # Crea Document LlamaIndex con metadata completi
+    doc = Document(
+        text=text,
+        metadata={
+            "source": file_path,
+            "filename": filename,
+            "file_type": file_type,
+            "extraction_method": actual_method,
+            "char_count": len(text),
+            "word_count": len(text.split()),
+            "line_count": len(text.splitlines()),
+            "file_size": file_info['size']
+        }
+    )
+    
+    return doc, actual_method
+
+# ============================================================================
+# 🔄 MODIFICATA: handle_file_upload con nuova logica
+# ============================================================================
+
+def handle_file_upload(uploaded_files, force_ocr: bool = False, batch_size: int = 50):
+    """
+    Gestisce upload con detection ed extraction automatica
+    
+    Args:
+        uploaded_files: File caricati da st.file_uploader
+        force_ocr: Flag per forzare OCR (da checkbox)
+        batch_size: Dimensione batch per indicizzazione
+    """
     if not uploaded_files:
         return
     
@@ -122,6 +400,7 @@ def handle_file_upload(uploaded_files):
     upload_dir = Path("data/uploads")
     upload_dir.mkdir(parents=True, exist_ok=True)
     
+    # STEP 1: Salva file su disco
     for uploaded_file in uploaded_files:
         try:
             file_path = upload_dir / uploaded_file.name
@@ -143,40 +422,111 @@ def handle_file_upload(uploaded_files):
                 'error': str(e)
             })
     
-    # Aggiorna lo stato
-    st.session_state.uploaded_files_info.extend(successful_uploads)
+    if not successful_uploads:
+        if failed_uploads:
+            st.error("❌ Nessun file caricato con successo")
+        return
     
-    # ✅ COSTRUISCI L'INDICE SUBITO
-    if successful_uploads:
+    # STEP 2: Estrai testo e crea Documents
+    new_documents = []
+    extraction_info = []
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    for i, file_info in enumerate(successful_uploads):
         try:
-            with st.spinner("📚 Indicizzando documenti con RAG pipeline..."):
-                file_paths = [doc['file_path'] for doc in st.session_state.uploaded_files_info]
-                
-                # Build index con TUTTI i file
-                st.session_state.rag_pipeline.build_index(file_paths=file_paths)
-                
-                # Setup query engine
-                st.session_state.rag_pipeline.setup_query_engine()
-                
-                # Flag che l'indice è pronto
-                st.session_state.index_ready = True
-                
-            st.success(f"✅ {len(successful_uploads)} documenti indicizzati!")
+            status_text.text(f"🔍 Elaborando {file_info['filename']}...")
+            
+            # 2a. Determina metodo estrazione
+            method = detect_extraction_method(
+                file_info['file_path'],
+                file_info['file_type'],
+                force_ocr
+            )
+            
+            # 2b. Estrai testo e crea Document
+            doc, actual_method = extract_and_create_document(file_info, method)
+            
+            new_documents.append(doc)
+            
+            # Aggiorna file_info con metodo effettivo
+            file_info['extraction_method'] = actual_method
+            extraction_info.append(file_info)
             
         except Exception as e:
-            st.error(f"❌ Errore indicizzazione: {e}")
-            return
+            st.error(f"❌ Errore elaborazione {file_info['filename']}: {e}")
+            failed_uploads.append({
+                'filename': file_info['filename'],
+                'error': str(e)
+            })
+            continue
+        
+        finally:
+            progress_bar.progress((i + 1) / len(successful_uploads))
     
-    # Mostra risultati
-    if successful_uploads:
-        st.markdown('<div class="status-box status-success">✅ Documenti caricati:</div>', unsafe_allow_html=True)
-        for doc in successful_uploads:
-            st.write(f"• {doc['filename']} ({doc['file_type']})")
+    progress_bar.empty()
+    status_text.empty()
+    
+    if not new_documents:
+        st.error("❌ Nessun documento elaborato con successo")
+        return
+    
+    # STEP 3: Accumula con documenti esistenti
+    if 'all_documents' not in st.session_state:
+        st.session_state.all_documents = []
+    
+    st.session_state.all_documents.extend(new_documents)
+    
+    # Aggiorna lista file info
+    st.session_state.uploaded_files_info.extend(extraction_info)
+    
+    # STEP 4: Build index con TUTTI i documenti
+    try:
+        with st.spinner(f"📚 Indicizzando {len(st.session_state.all_documents)} documenti totali..."):
+            # ✅ PASSA DOCUMENTS E BATCH_SIZE
+            st.session_state.rag_pipeline.build_index(
+                documents=st.session_state.all_documents,
+                batch_size=batch_size  # 🆕 Parametro batch
+            )
+            
+            # Setup query engine
+            st.session_state.rag_pipeline.setup_query_engine()
+            
+            # Flag che l'indice è pronto
+            st.session_state.index_ready = True
+        
+        st.success(f"✅ {len(new_documents)} nuovi documenti indicizzati! (Totale: {len(st.session_state.all_documents)})")
+        
+    except Exception as e:
+        st.error(f"❌ Errore indicizzazione: {e}")
+        import traceback
+        st.error(traceback.format_exc())
+        return
+    
+    # STEP 5: Mostra risultati
+    if extraction_info:
+        st.markdown('<div class="status-box status-success">✅ Documenti elaborati:</div>', unsafe_allow_html=True)
+        for doc in extraction_info:
+            # Icone basate sul metodo di estrazione
+            icon = {
+                'pdf_text': '📄',
+                'pdf_ocr_fallback': '🔄',
+                'ocr': '🔍',
+                'docx': '📝',
+                'text': '📃'
+            }.get(doc['extraction_method'], '📄')
+            
+            st.write(f"{icon} {doc['filename']} ({doc['extraction_method']})")
     
     if failed_uploads:
         st.markdown('<div class="status-box status-error">❌ Errori:</div>', unsafe_allow_html=True)
         for doc in failed_uploads:
             st.write(f"• {doc['filename']}: {doc['error']}")
+
+# ============================================================================
+# FUNZIONI ESISTENTI (invariate)
+# ============================================================================
 
 def handle_query(query: str):
     """Gestisce le query dell'utente in base alla modalità"""
@@ -394,6 +744,10 @@ def initialize_session_state():
     # ✅ AGGIUNGI: inizializzazione LLM condiviso
     if 'shared_llm' not in st.session_state:
         st.session_state.shared_llm = None
+    
+    # 🆕 AGGIUNGI: lista documenti accumulati
+    if 'all_documents' not in st.session_state:
+        st.session_state.all_documents = []
 
 def reset_mode_data(mode):
     """Resetta i dati di una specifica modalità"""
@@ -409,6 +763,7 @@ def reset_mode_data(mode):
         st.session_state.messages_rag = []
         st.session_state.rag_pipeline = None
         st.session_state.index_ready = False
+        st.session_state.all_documents = []  # 🆕 Reset documenti
     
     elif mode == 'chat':
         st.session_state.messages_chat = []
@@ -421,7 +776,7 @@ def initialize_components():
         config = RAGConfig(
             llm_model="llama3.2:3b-instruct-q4_K_M",
             embedding_model="nomic-ai/nomic-embed-text-v1.5",
-            chunk_sizes=[2048, 512],
+            chunk_sizes=[1024, 512],
             temperature=0.3,
             context_window=4096,
             use_reranker=True,
@@ -436,7 +791,7 @@ def initialize_components():
                 
                 st.session_state.shared_llm = Ollama(
                     model=config.llm_model,
-                    base_url=config.ollama_base_url,  # ✅ Da RAGConfig
+                    base_url=config.ollama_base_url,
                     temperature=config.temperature,
                     context_window=config.context_window,
                     request_timeout=120.0,
@@ -448,7 +803,6 @@ def initialize_components():
         if st.session_state.app_mode == 'rag':
             if st.session_state.rag_pipeline is None:
                 with st.spinner("Inizializzazione RAG Pipeline..."):
-                    # ✅ USA STESSO CONFIG + LLM CONDIVISO
                     st.session_state.rag_pipeline = OptimizedRAGPipeline(
                         config, 
                         llm=st.session_state.shared_llm
@@ -456,7 +810,6 @@ def initialize_components():
         else:
             if st.session_state.chat_pipeline is None:
                 with st.spinner("Inizializzazione Chat Pipeline..."):
-                    # ✅ CONFIG PIÙ SEMPLICE PER CHAT (stesso LLM)
                     chat_config = RAGConfig(
                         llm_model=config.llm_model,
                         temperature=config.temperature,
@@ -530,6 +883,24 @@ def main():
         with st.sidebar:
             st.header("📁 Gestione Documenti")
             
+            # 🆕 SLIDER BATCH SIZE
+            with st.expander("⚙️ Impostazioni Avanzate"):
+                batch_size = st.slider(
+                    "Batch Size per Indicizzazione",
+                    min_value=10,
+                    max_value=200,
+                    value=50,
+                    step=10,
+                    help="Numero di nodi processati per batch. Riduci se hai file molto grandi o problemi di memoria."
+                )
+            
+            # 🆕 CHECKBOX OCR
+            use_ocr = st.checkbox(
+                "🔍 Forza OCR per tutti i file",
+                value=False,
+                help="Se attivo, usa OCR anche per PDF/DOCX (utile per documenti scansionati)"
+            )
+            
             st.subheader("Carica Nuovi Documenti")
             uploaded_files = st.file_uploader(
                 "Trascina i file qui o clicca per selezionare",
@@ -539,34 +910,44 @@ def main():
             )
             
             if st.button("📤 Carica Documenti", disabled=not uploaded_files):
-                handle_file_upload(uploaded_files)
+                handle_file_upload(uploaded_files, force_ocr=use_ocr, batch_size=batch_size)  # 🆕 Passa batch_size
                 st.rerun()
             
             if st.session_state.uploaded_files_info:
                 st.subheader("📋 Documenti Caricati")
                 for doc in st.session_state.uploaded_files_info:
-                    with st.expander(f"{doc['filename']} ({doc['file_type']})"):
+                    # 🆕 Icone basate sul metodo di estrazione
+                    icon = {
+                        'pdf_text': '📄',
+                        'pdf_ocr_fallback': '🔄',
+                        'ocr': '🔍',
+                        'docx': '📝',
+                        'text': '📃'
+                    }.get(doc.get('extraction_method', 'text'), '📄')
+                    
+                    with st.expander(f"{icon} {doc['filename']}"):
+                        st.write(f"**Tipo:** {doc['file_type']}")
+                        if 'extraction_method' in doc:
+                            st.write(f"**Estrazione:** {doc['extraction_method']}")
                         st.write(f"**Dimensione:** {doc['size']} bytes")
                         st.write(f"**Path:** {doc['file_path']}")
             
             st.divider()
             
-            # 🎯 STATISTICHE SEMPLIFICATE - SOLO ESSENZIALI
+            # 🎯 STATISTICHE SEMPLIFICATE
             st.subheader("📊 Statistiche Sistema")
             
             if st.session_state.rag_pipeline and st.session_state.get('index_ready', False):
                 try:
                     stats = st.session_state.rag_pipeline.get_statistics()
                     
-                    # Solo documenti e nodi totali
                     data = stats.get('data', {})
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.metric("📄 Documenti", data.get('total_documents', 0))
+                        st.metric("📄 Documenti", len(st.session_state.all_documents))
                     with col2:
                         st.metric("🔗 Nodi totali", data.get('total_nodes', 0))
                     
-                    # Solo query totali
                     perf = stats.get('performance', {})
                     st.metric("💬 Query eseguite", perf.get('total_queries', 0))
                 
@@ -587,7 +968,6 @@ def main():
             st.header("💬 Modalità Chat")
             st.info("Chat specializzata in diritto amministrativo italiano e illeciti amministrativi.")
             
-            # 🎯 STATISTICHE SEMPLIFICATE CHAT
             st.subheader("📊 Statistiche")
             
             messages_count = len(st.session_state.messages_chat)
@@ -597,10 +977,7 @@ def main():
                 try:
                     stats = st.session_state.chat_pipeline.get_statistics()
                     perf = stats.get('performance', {})
-                    
-                    # Solo query totali
                     st.metric("📝 Query totali", perf.get('total_queries', 0))
-                    
                 except Exception as e:
                     st.warning(f"⚠️ Statistiche non disponibili")
             
@@ -673,10 +1050,16 @@ def main():
         **Come usare la modalità RAG:**
         
         1. **Carica documenti**: Usa la sidebar per caricare PDF, DOCX o immagini
-        2. **Fai domande**: Scrivi domande specifiche sui tuoi file
-        3. **Analisi dettagliata**: Ricevi risposte con fonti e metadata completi
+        2. **Scegli OCR**: Spunta "Forza OCR" per documenti scansionati
+        3. **Fai domande**: Scrivi domande specifiche sui tuoi file
+        4. **Analisi dettagliata**: Ricevi risposte con fonti e metadata completi
         
-        **Formati supportati:** PDF, DOCX, TXT, JPG, PNG
+        **Formati supportati:** PDF (nativi e scansionati), DOCX, TXT, JPG, PNG
+        
+        **Estrazione intelligente:**
+        - PDF nativi → estrazione testo veloce
+        - PDF scansionati → OCR automatico
+        - Immagini → OCR diretto
         """
     else:
         info_title = "ℹ️ Informazioni - Modalità Chat"

@@ -127,20 +127,22 @@ class OptimizedRAGPipeline:
         self,
         file_paths: List[str] = None,
         directories: List[str] = None,
-        documents: List[Document] = None
+        documents: List[Document] = None,
+        batch_size: int = 50  # 🆕 Parametro batch size
     ) -> VectorStoreIndex:
         """
-        Costruisce indice FLAT deterministico dai documenti
+        Costruisce indice FLAT deterministico dai documenti con batching
         
         Args:
             file_paths: Lista di file da indicizzare
             directories: Liste di directory da indicizzare
             documents: Documenti già caricati (opzionale)
+            batch_size: Numero di nodi per batch (default: 50)
             
         Returns:
             VectorStoreIndex costruito
         """
-        logger.info("Building FLAT index (deterministic)...")
+        logger.info("Building FLAT index (deterministic) with batching...")
         
         # Carica documenti se non forniti
         if documents is None:
@@ -154,6 +156,8 @@ class OptimizedRAGPipeline:
         
         # Crea nodi gerarchici
         leaf_nodes, all_nodes = self.document_processor.create_hierarchical_nodes(documents)
+        
+        logger.info(f"Total nodes to index: {len(leaf_nodes)}")
         
         # Setup FAISS FLAT index
         faiss_index = self.faiss_manager.create_index()
@@ -169,13 +173,68 @@ class OptimizedRAGPipeline:
             docstore=docstore
         )
         
-        # Costruisci indice
-        self.index = VectorStoreIndex(
-            leaf_nodes,
-            storage_context=self.storage_context,
-            show_progress=True,
-            use_async=self.config.async_processing
-        )
+        # 🆕 BATCHING: dividi nodi in batch
+        num_batches = (len(leaf_nodes) + batch_size - 1) // batch_size
+        logger.info(f"Processing {num_batches} batches of ~{batch_size} nodes each")
+        
+        # 🆕 Costruisci indice in batch
+        import streamlit as st
+        
+        # Progress bar opzionale (se streamlit disponibile)
+        try:
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+        except:
+            progress_bar = None
+            status_text = None
+        
+        for batch_idx in range(num_batches):
+            start_idx = batch_idx * batch_size
+            end_idx = min((batch_idx + 1) * batch_size, len(leaf_nodes))
+            batch_nodes = leaf_nodes[start_idx:end_idx]
+            
+            batch_info = f"Batch {batch_idx + 1}/{num_batches}: {len(batch_nodes)} nodes"
+            logger.info(batch_info)
+            
+            if status_text:
+                status_text.text(f"🔄 {batch_info}")
+            
+            try:
+                # 🆕 Costruisci indice per questo batch
+                if batch_idx == 0:
+                    # Primo batch: crea indice
+                    self.index = VectorStoreIndex(
+                        batch_nodes,
+                        storage_context=self.storage_context,
+                        show_progress=False,
+                        use_async=self.config.async_processing
+                    )
+                else:
+                    # Batch successivi: inserisci nodi nell'indice esistente
+                    for node in batch_nodes:
+                        self.index.insert_nodes([node])
+                
+                # Aggiorna progress bar
+                if progress_bar:
+                    progress_bar.progress((batch_idx + 1) / num_batches)
+                
+                # 🆕 Piccola pausa per evitare overload
+                if batch_idx < num_batches - 1:
+                    time.sleep(0.1)
+                    
+            except Exception as e:
+                logger.error(f"Error in batch {batch_idx + 1}: {e}")
+                if progress_bar:
+                    progress_bar.empty()
+                if status_text:
+                    status_text.empty()
+                raise
+    
+        # Cleanup progress indicators
+        if progress_bar:
+            progress_bar.empty()
+        if status_text:
+            status_text.empty()
         
         # Setup retriever
         self.retrieval_manager.create_retriever(self.index, self.storage_context)
@@ -193,11 +252,11 @@ class OptimizedRAGPipeline:
         )
         
         self.stats["index_built"] = True
-        logger.info(f"FLAT index built successfully with {len(leaf_nodes)} nodes")
+        logger.info(f"FLAT index built successfully with {len(leaf_nodes)} nodes in {num_batches} batches")
         
         return self.index
     
-    def setup_query_engine(self, response_mode: ResponseMode = ResponseMode.TREE_SUMMARIZE):
+    def setup_query_engine(self, response_mode: ResponseMode = ResponseMode.COMPACT):
         """Configura query engine"""
         if not self.retrieval_manager.retriever:
             raise ValueError("Index not built. Call build_index() first")

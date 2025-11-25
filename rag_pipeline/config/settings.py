@@ -57,7 +57,7 @@ class RAGConfig:
     # Performance
     num_threads: int = 8
     use_gpu: bool = True
-    async_processing: bool = True
+    async_processing: bool = False
     
     # Retrieval
     similarity_top_k: int = 10
