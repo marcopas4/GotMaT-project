@@ -98,7 +98,7 @@ class OptimizedRAGPipeline:
             base_url=self.config.ollama_base_url,
             temperature=self.config.temperature,
             context_window=self.config.context_window,
-            request_timeout=120.0,
+            request_timeout=240.0,
             additional_kwargs={
                 "num_thread": self.config.num_threads,
                 "num_gpu": 1 if self.config.use_gpu else 0,

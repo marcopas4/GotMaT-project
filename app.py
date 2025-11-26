@@ -794,7 +794,7 @@ def initialize_components():
                     base_url=config.ollama_base_url,
                     temperature=config.temperature,
                     context_window=config.context_window,
-                    request_timeout=120.0,
+                    request_timeout=240.0,
                 )
                 
                 st.info(f"🔗 Connesso a Ollama: {config.ollama_base_url}")

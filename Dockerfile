@@ -1,17 +1,14 @@
-# Multi-stage build per ottimizzare dimensioni
+# Stage 1: Builder - Installa tutte le dipendenze
 FROM python:3.10-slim as builder
 
-# Metadata
 LABEL maintainer="RAG Prefettura Team"
-LABEL description="RAG Pipeline + Chat Assistant for Italian Administrative Law"
-
-# Variabili ambiente
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Installa dipendenze di sistema
+# Installa dipendenze di sistema (incluse quelle per OpenCV e pdf2image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
@@ -19,59 +16,55 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr \
     tesseract-ocr-ita \
     libmagic1 \
+    # Corretto per OpenCV su Debian/ARM64
+    libgl1 \
+    libglib2.0-0 \
+    # Aggiunta per pdf2image
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Crea directory di lavoro
 WORKDIR /app
-
-# Copia requirements e installa dipendenze Python
 COPY requirements.txt .
 
-# Installa dipendenze in ordine ottimizzato per caching
-# Prima le dipendenze pesanti che cambiano raramente
-RUN pip install --user --no-warn-script-location \
-    torch==2.8.0 torchvision==0.23.0 
+# Installa torch separatamente per caching
+RUN pip install --user --no-warn-script-location torch==2.8.0 torchvision==0.23.0
 
-# Poi il resto delle dipendenze
+# Installa il resto delle dipendenze
 RUN pip install --user --no-warn-script-location -r requirements.txt
 
-# Stage finale
+
+# Stage 2: Final - Crea l'immagine di produzione
 FROM python:3.10-slim
 
-# Installa solo runtime dependencies
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    DEBIAN_FRONTEND=noninteractive
+
+# Installa solo le dipendenze di sistema per l'esecuzione
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
     tesseract-ocr \
     tesseract-ocr-ita \
     libmagic1 \
-    curl \
+    # Corretto per OpenCV su Debian/ARM64
+    libgl1 \
+    libglib2.0-0 \
+    poppler-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Copia dipendenze Python da builder
+# Copia le dipendenze Python dallo stage builder
 COPY --from=builder /root/.local /root/.local
-
-# Imposta PATH per Python packages
 ENV PATH=/root/.local/bin:$PATH
 
-# Crea directory di lavoro
 WORKDIR /app
-
-# Crea directory necessarie
 RUN mkdir -p data/uploads data/indexes storage evaluation/results logs
-
-# Copia il codice dell'applicazione
 COPY . .
 
-# Download modello spaCy italiano (opzionale ma consigliato)
-RUN python -m spacy download it_core_news_sm || echo "Spacy model download skipped"
-
-# Esponi porta Streamlit
+# Esponi porta e avvia
 EXPOSE 8501
-
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8501/_stcore/health || exit 1
 
-# Comando di avvio
 CMD ["streamlit", "run", "app.py", \
      "--server.port=8501", \
      "--server.address=0.0.0.0", \
